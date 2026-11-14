@@ -1,7 +1,7 @@
 // Copyright (C) 2026 NodePassProject <https://github.com/NodePassProject>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Encrypted forwarding resolver, bounded optimistic cache and hedged failover.
+//! Forwarding resolver, bounded optimistic cache and hedged failover.
 
 mod cache;
 mod config;
@@ -9,6 +9,7 @@ mod health;
 mod hijack;
 mod http3;
 mod https;
+mod plain;
 mod stats;
 mod upstream;
 
@@ -59,7 +60,14 @@ impl fmt::Debug for DnsResolver {
 
 impl DnsResolver {
     pub(crate) fn new(config: DnsConfig, policy: DialPolicy) -> Result<Arc<Self>> {
-        let resolver = Self::with_tls(config, policy, upstream::client_config()?)?;
+        let tls = upstream::client_config(
+            config
+                .primary
+                .iter()
+                .chain(&config.fallback)
+                .any(|u| u.transport.encrypted()),
+        )?;
+        let resolver = Self::with_tls(config, policy, tls)?;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             for upstream in &resolver.upstreams {
                 let upstream = Arc::downgrade(upstream);
@@ -456,7 +464,7 @@ impl DnsResolver {
             }
         }
         if addresses.is_empty() {
-            bail!("encrypted DNS returned no target IP address");
+            bail!("DNS returned no target IP address");
         }
         Ok(addresses)
     }

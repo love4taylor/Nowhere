@@ -10,20 +10,26 @@ use super::*;
 #[test]
 fn dns_settings_are_validated_at_startup_and_shared_with_direct_outbound() {
     for out in ["direct", "egress", "127.0.0.1:1080"] {
-        let portal = Portal::new(Url::parse(&format!(
-            "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?out={out}&dns=https://1.1.1.1/dns-query"
-        )).unwrap(), Logger).unwrap();
-        assert!(portal.inner.forward.dns.is_some());
-        assert!(
-            portal
-                .inner
-                .effective
-                .contains("dns=encrypted&dns-hijack=1")
-        );
-        assert!(!portal.inner.effective.contains("1.1.1.1"));
+        for (upstreams, mode) in [
+            ("https://1.1.1.1/dns-query", "encrypted"),
+            ("udp://1.1.1.1,tcp://1.1.1.1", "plaintext"),
+            ("https://1.1.1.1/dns-query,udp://1.1.1.1", "mixed"),
+        ] {
+            let portal = Portal::new(Url::parse(&format!(
+                "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?out={out}&dns={upstreams}"
+            )).unwrap(), Logger).unwrap();
+            assert!(portal.inner.forward.dns.is_some());
+            assert!(
+                portal
+                    .inner
+                    .effective
+                    .contains(&format!("dns={mode}&dns-hijack=1"))
+            );
+            assert!(!portal.inner.effective.contains("1.1.1.1"));
+        }
     }
     for query in [
-        "dns=udp://1.1.1.1",
+        "dns=udp://1.1.1.1/path",
         "dns-hijack=1",
         "dns=tls://1.1.1.1&dns-cache-size=0",
     ] {

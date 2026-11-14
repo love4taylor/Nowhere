@@ -1,7 +1,7 @@
 // Copyright (C) 2026 NodePassProject <https://github.com/NodePassProject>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Startup-validated encrypted DNS configuration. No implicit plaintext fallback.
+//! Startup-validated DNS configuration with explicit transport selection.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -37,6 +37,14 @@ pub(super) enum Transport {
     Http3,
     Tls,
     Quic,
+    Tcp,
+    Udp,
+}
+
+impl Transport {
+    pub(super) fn encrypted(self) -> bool {
+        !matches!(self, Self::Tcp | Self::Udp)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,9 +64,9 @@ impl UpstreamConfig {
             "h3" => (Transport::Http3, 443),
             "tls" => (Transport::Tls, 853),
             "quic" => (Transport::Quic, 853),
-            _ => bail!(
-                "DNS upstream requires https:// (DoH/H2), h3:// (DoH/H3), tls:// (DoT) or quic:// (DoQ)"
-            ),
+            "tcp" => (Transport::Tcp, 53),
+            "udp" => (Transport::Udp, 53),
+            _ => bail!("DNS upstream requires https://, h3://, tls://, quic://, tcp:// or udp://"),
         };
         if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
             bail!("DNS upstream must not contain credentials or a fragment");
@@ -69,7 +77,7 @@ impl UpstreamConfig {
             .trim_start_matches('[')
             .trim_end_matches(']')
             .to_owned();
-        ServerName::try_from(host.clone()).context("invalid DNS TLS server name")?;
+        ServerName::try_from(host.clone()).context("invalid DNS upstream host")?;
         let port = url.port().unwrap_or(default_port);
         if port == 0 {
             bail!("DNS upstream port must be nonzero");
@@ -77,7 +85,7 @@ impl UpstreamConfig {
         if !matches!(transport, Transport::Https | Transport::Http3)
             && !matches!(url.path(), "" | "/")
         {
-            bail!("DoT/DoQ upstream must not contain a path");
+            bail!("non-HTTP DNS upstream must not contain a path");
         }
         let mut bootstrap = None;
         for (key, value) in url.query_pairs() {
@@ -256,6 +264,14 @@ impl DnsConfig {
 
     /// The effective service URL deliberately omits upstream names and bootstrap details.
     pub(crate) fn effective(&self) -> String {
-        format!("&dns=encrypted&dns-hijack={}", u8::from(self.hijack))
+        let upstreams = self.primary.iter().chain(&self.fallback);
+        let encrypted = upstreams.clone().any(|u| u.transport.encrypted());
+        let plaintext = upstreams.clone().any(|u| !u.transport.encrypted());
+        let mode = match (encrypted, plaintext) {
+            (true, false) => "encrypted",
+            (false, true) => "plaintext",
+            _ => "mixed",
+        };
+        format!("&dns={mode}&dns-hijack={}", u8::from(self.hijack))
     }
 }

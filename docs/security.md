@@ -272,10 +272,13 @@ By default, DNS and target sockets belong to the selected exit. Explicit source
 binding errors fail the dial and do not retry with an automatic source.
 The optional [built-in DNS resolver](configuration.md#built-in-dns) is an explicit
 exception: the configured Portal/Egress resolves intercepted TCP/UDP port-53
-Flows locally and connects directly to its encrypted upstreams, before selecting
-a SOCKS5 or registered Egress outlet. It verifies upstream certificates, never
-falls back to plaintext DNS for client questions, bounds cache and query memory,
-and exposes no unauthenticated DNS listener. A hostname upstream may use system
+Flows locally and connects directly to its configured upstreams, before selecting
+a SOCKS5 or registered Egress outlet. Encrypted transports verify upstream
+certificates and never implicitly downgrade. Traditional plaintext DNS requires
+an explicit `udp://` or `tcp://` entry; mixed primary/fallback lists may therefore
+use plaintext if the operator configures it. UDP requests use randomized IDs and
+source ports and verify the response source and question. The resolver bounds
+cache and query memory and exposes no unauthenticated DNS listener. A hostname upstream may use system
 DNS for bootstrap unless an explicit bootstrap IP is supplied.
 
 ## Local IPC
