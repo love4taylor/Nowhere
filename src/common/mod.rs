@@ -6,6 +6,7 @@
 mod config;
 mod datagram;
 mod dial;
+pub(crate) mod dns;
 mod endpoint;
 mod lifecycle;
 mod logger;

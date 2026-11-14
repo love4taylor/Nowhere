@@ -268,8 +268,15 @@ QUIC Egress registration bounds Stream acquisition, AuthFrame sending and the
 complete ACCEPTED reply with one handshake deadline. See
 [Egress ownership](egress.md#registration-ownership-and-lifetime).
 
-DNS and target sockets belong to the selected exit. Explicit source binding
-errors fail the dial and do not retry with an automatic source.
+By default, DNS and target sockets belong to the selected exit. Explicit source
+binding errors fail the dial and do not retry with an automatic source.
+The optional [built-in DNS resolver](configuration.md#built-in-dns) is an explicit
+exception: the configured Portal/Egress resolves intercepted TCP/UDP port-53
+Flows locally and connects directly to its encrypted upstreams, before selecting
+a SOCKS5 or registered Egress outlet. It verifies upstream certificates, never
+falls back to plaintext DNS for client questions, bounds cache and query memory,
+and exposes no unauthenticated DNS listener. A hostname upstream may use system
+DNS for bootstrap unless an explicit bootstrap IP is supplied.
 
 ## Local IPC
 

@@ -36,6 +36,13 @@ impl Egress {
             crate::portal::config::PortalRuntimeConfig::from_env(config.handshake_timeout)?;
         let tls = ClientTls::new(&config)?;
         let dial = DialPolicy::from_query(&query)?;
+        let dns_config = crate::common::dns::DnsConfig::from_url(&url)?;
+        let dns_effective = dns_config
+            .as_ref()
+            .map_or_else(String::new, |config| config.effective());
+        let dns = dns_config
+            .map(|config| crate::common::dns::DnsResolver::new(config, dial.clone()))
+            .transpose()?;
         let rate = |name: &str| -> Result<i32> {
             query.get(name).map_or(Ok(0), |s| {
                 s.parse::<i32>()
@@ -47,7 +54,7 @@ impl Egress {
         let upload = rate("rate")?;
         let download = rate("etar")?;
         let effective = format!(
-            "egress://{}?sni={}&pin={}&{}&morph={}&rate={upload}&etar={download}",
+            "egress://{}?sni={}&pin={}&{}&morph={}&rate={upload}&etar={download}{dns_effective}",
             config.endpoint(),
             config.sni.as_deref().unwrap_or(config.host()),
             config.pin.as_deref().unwrap_or("none"),
@@ -60,8 +67,9 @@ impl Egress {
             128
         };
         let forward = Arc::new(Forwarder {
+            dns: dns.clone(),
             runtime,
-            outbound: Outlet::Network(Arc::new(OutboundDialer::new(dial, None))),
+            outbound: Outlet::Network(Arc::new(OutboundDialer::new(dial, None).with_dns(dns))),
             logger,
             stats: Arc::new(Stats::default()),
             buffers: Buffers::new(runtime.tcp_data_buf_size),

@@ -74,6 +74,13 @@ impl Portal {
             None
         };
         let dial = DialPolicy::from_query(&query)?;
+        let dns_config = crate::common::dns::DnsConfig::from_url(&url)?;
+        let dns_effective = dns_config
+            .as_ref()
+            .map_or_else(String::new, |config| config.effective());
+        let dns = dns_config
+            .map(|config| crate::common::dns::DnsResolver::new(config, dial.clone()))
+            .transpose()?;
         let socks = if !matches!(out, "direct" | "egress") {
             SocksConfig::from_url(&url)?
         } else {
@@ -93,7 +100,7 @@ impl Portal {
             morph_keys.is_some(),
         )?;
         let effective = format!(
-            "portal://{}?out={out_label}&tls={tls_mode}{}{}{}&morph={}&rate={rate}&etar={etar}",
+            "portal://{}?out={out_label}&tls={tls_mode}{}{}{}&morph={}&rate={rate}&etar={etar}{dns_effective}",
             endpoint.canonical(),
             if registry.is_some() {
                 String::new()
@@ -122,9 +129,12 @@ impl Portal {
         );
         let outbound = match &registry {
             Some(registry) => Outlet::Egress(registry.clone()),
-            None => Outlet::Network(Arc::new(OutboundDialer::new(dial, socks))),
+            None => Outlet::Network(Arc::new(
+                OutboundDialer::new(dial, socks).with_dns(dns.clone()),
+            )),
         };
         let forward = Arc::new(Forwarder {
+            dns,
             runtime,
             outbound,
             logger,

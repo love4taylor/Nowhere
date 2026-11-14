@@ -10,6 +10,7 @@ Configure listeners, transport selection and a fixed exit with service URLs.
 - [Portal URL](#portal-url)
 - [Vector URL](#vector-url)
 - [Egress URL](#egress-url)
+- [Built-in DNS](#built-in-dns)
 - [Parsing configuration](#parsing-configuration)
 - [Parameter overview](#parameter-overview)
 - [Rate limits](#rate-limits)
@@ -267,6 +268,91 @@ credentials, `crt`, `key` and unknown options are omitted. Portal with
 `out=egress` also omits source-binding parameters. These redacted URLs are
 diagnostic views, not complete launch configurations.
 
+## Built-in DNS
+
+Portal and Egress can run an embedded, encrypted forwarding resolver. It is
+disabled unless `dns` is configured. Once enabled, `dns-hijack=1` is the default:
+**every authenticated TCP or UDP Flow targeting port 53 is answered by this
+resolver**, regardless of the target IPv4 address, IPv6 address or domain name.
+The original destination is never contacted or resolved. Vector requires no
+change. Both TLS and QUIC carriers and both Morph modes support interception.
+
+Interception runs before fixed-outlet selection, including a SOCKS5 upstream or
+an offline Egress registry. Configure DNS on Portal to answer there, or configure
+it on Egress to answer at the exit. If both are configured, Portal intercepts
+first. This does not redirect traffic that bypasses Nowhere, intercept encrypted
+client DNS (DoH/DoT/DoQ), install firewall rules, or open a public DNS listener.
+
+| Parameter | Default | Meaning / bounds |
+|---|---|---|
+| `dns` | Disabled | Comma-separated primary encrypted upstream URLs; required with any DNS option |
+| `dns-fallback` | Absent | Comma-separated fallback URLs; at most 8 upstreams total |
+| `dns-hijack` | `1` | `1`: intercept TCP/UDP target port 53; `0`: retain normal forwarding |
+| `dns-cache-size` | `4096` | Maximum cached entries, `1..=65536` |
+| `dns-cache-bytes` | `8388608` | Maximum charged cache bytes, `1..=67108864` |
+| `dns-stale` | `1h` | Maximum optimistic stale window after TTL expiry, `0s..=24h`; `0s` disables stale answers |
+| `dns-timeout` | `2s` | Total per-query deadline shared by primary/fallback, `10ms..=30s` |
+| `dns-fallback-delay` | `50ms` | Start the next candidate after this budget, `1ms..=2s`, less than `dns-timeout` |
+| `dns-probe-interval` | `250ms` | Retry unhealthy upstreams at this interval, `10ms..=60s` |
+
+Upstreams use `https://HOST[:443]/dns-query` (DoH over HTTP/2),
+`tls://HOST[:853]` (DoT), or `quic://HOST[:853]` (DoQ, RFC 9250). Certificates
+must validate against the system trust store and match `HOST`. There is no
+insecure mode or implicit plaintext fallback. Encrypted sessions are reused;
+TCP sockets use TCP_NODELAY. Upstream requests connect directly from the resolver
+host, obey its `dial`/`dial4`/`dial6` and address preference, and do not traverse
+the fixed SOCKS5/Egress outlet.
+
+An upstream URL may contain one `bootstrap=IP` parameter. It fixes the remote
+IP while preserving the URL host for TLS identity verification. Otherwise,
+hostname upstreams are bootstrapped using the host's system resolver. Use an IP
+URL with a matching certificate or explicit bootstrap to avoid that plaintext
+bootstrap lookup. No system-DNS retry occurs when encrypted resolution fails.
+Percent-encode nested URL query delimiters inside a role URL:
+
+```sh
+nowhere 'portal://KEY@*:2000?prefer=ipv4&tcp-concurrent=1&dns=https://1.1.1.1/dns-query&dns-fallback=tls://1.0.0.1&dns-fallback-delay=50ms&dns-probe-interval=250ms'
+nowhere 'portal://KEY@*:2000?dns=quic://dns.adguard-dns.com%3Fbootstrap%3D94.140.14.14&dns-fallback=https://1.1.1.1/dns-query'
+```
+
+Configured, healthy primary upstreams precede fallbacks. A transport failure,
+SERVFAIL, REFUSED or invalid reply starts the next candidate immediately. A slow
+candidate starts the next after `dns-fallback-delay`; the first valid answer wins
+and pending attempts are cancelled. Degraded candidates follow healthy
+alternatives and are retried only if those alternatives also stall or fail.
+Background root-NS probes restore recovered
+upstreams to their original priority. Probe budgets are bounded by
+`min(dns-timeout, max(dns-probe-interval, dns-fallback-delay))`. Millisecond
+settings are scheduling budgets, not a guarantee on network RTT or TLS/QUIC
+handshake completion. The first query initializes probes; idle healthy upstreams
+are not continuously probed. State transitions log upstream indices, not queries.
+
+Fresh cached records age their TTLs, including the HTTP `Age` of DoH responses.
+Expired positive answers return immediately
+with TTL 1 and AD cleared while one deduplicated background refresh runs. Failed
+refreshes never extend the stale window; refresh retries are throttled by
+`dns-probe-interval`. Negative answers require an SOA, use the smaller SOA TTL and
+MINIMUM, and are never served stale. TTL 0 and failed/truncated replies are not
+cached. Cookies, ECS and other EDNS options bypass caching. The wire cache has
+both count and byte limits and skips individual responses larger than 16 KiB.
+At most 128 upstream query jobs and 64 DNS ingress operations run concurrently;
+each UDP Flow retains at most 16 completed replies. These limits bound memory on
+small servers.
+
+UDP replies obey the client's advertised payload size (512 bytes without EDNS,
+capped at 4096); larger answers set TC for a TCP retry. TCP supports length
+framing and repeated/pipelined queries. Unsupported zone transfers and signed
+TSIG requests return NOTIMP. This is a forwarding resolver, not a local DNSSEC
+validator: fresh answers retain the upstream's AD result and stale answers clear
+it. Client transaction IDs and question casing are restored on all answers.
+
+When enabled, the same resolver also resolves direct domain targets and locally
+resolved SOCKS5 proxy/UDP-relay names. It does not consult `/etc/hosts` for these
+targets. A SOCKS5 target domain is still passed unchanged to the proxy for remote
+resolution. Without `dns`, all prior resolution and port-53 forwarding behavior
+is retained. Startup diagnostics show `dns=encrypted` and `dns-hijack`; actual
+upstream URLs are omitted.
+
 ## Parameter overview
 
 A dash means that the role does not recognize the parameter.
@@ -288,6 +374,9 @@ A dash means that the role does not recognize the parameter.
 | `morph` | `0`, `1` | `1` | Yes | Yes | Yes |
 | `rate` | `0..=2147483647` Mbps | `0` | Yes | Yes | Yes |
 | `etar` | `0..=2147483647` Mbps | `0` | Yes | Yes | Yes |
+| `dns`, `dns-fallback` | Encrypted upstream URL list | Disabled / absent | Yes | — | Yes |
+| `dns-hijack` | `0`, `1` | `1` with `dns` | Yes | — | Yes |
+| DNS cache, timeout and failover options | See [Built-in DNS](#built-in-dns) | See above | Yes | — | Yes |
 
 ## Rate limits
 

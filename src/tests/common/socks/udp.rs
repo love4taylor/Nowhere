@@ -41,6 +41,7 @@ async fn pair(socks: bool) -> (OutboundUdpSocket, UdpSocket, Option<TcpStream>) 
 
 async fn readable(socket: &OutboundUdpSocket) {
     match socket {
+        OutboundUdpSocket::Dns(_) => unreachable!(),
         OutboundUdpSocket::Direct(socket) => socket.readable().await.unwrap(),
         OutboundUdpSocket::Socks(association) => association.socket.readable().await.unwrap(),
     }

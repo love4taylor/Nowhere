@@ -23,6 +23,9 @@ impl Forwarder {
         cancel: CancellationToken,
     ) -> Result<()> {
         let dial = async {
+            if let Some(dns) = self.dns.as_ref().filter(|dns| dns.hijacks(target)) {
+                return Ok(UdpTarget::Network(OutboundUdpSocket::Dns(dns.open_udp())));
+            }
             match &self.outbound {
                 Outlet::Network(dialer) => dialer
                     .dial_udp_target(target, self.runtime.udp_dial_timeout)
