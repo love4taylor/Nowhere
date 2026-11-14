@@ -3,7 +3,9 @@
 
 //! Network binding and outbound dial helpers.
 
+use std::future::{Future, poll_fn};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -141,6 +143,12 @@ async fn connect_tcp_candidates(
     policy: &DialPolicy,
     addresses: Vec<SocketAddr>,
 ) -> Result<TcpStream> {
+    if policy.tcp_concurrent() {
+        return first_success(addresses.into_iter().map(|address| async move {
+            connect_tcp_addr(policy.local_ip(address.ip())?, address).await
+        }))
+        .await;
+    }
     let mut last_err = None;
     for address in addresses {
         match connect_tcp_addr(policy.local_ip(address.ip())?, address).await {
@@ -149,6 +157,39 @@ async fn connect_tcp_candidates(
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("common::util::dial_tcp_from_local_ip: no target address matches configured address family")))
+}
+
+/// Dropping the race on success, timeout or cancellation closes all losing sockets.
+pub(super) async fn first_success<T, F: Future<Output = Result<T>>>(
+    attempts: impl IntoIterator<Item = F>,
+) -> Result<T> {
+    let mut pending: Vec<_> = attempts
+        .into_iter()
+        .map(|attempt| Some(Box::pin(attempt)))
+        .collect();
+    let mut last_err = None;
+    poll_fn(|cx| {
+        let mut waiting = false;
+        for attempt in &mut pending {
+            let Some(future) = attempt else { continue };
+            match future.as_mut().poll(cx) {
+                Poll::Ready(Ok(value)) => return Poll::Ready(Ok(value)),
+                Poll::Ready(Err(error)) => {
+                    last_err = Some(error);
+                    *attempt = None;
+                }
+                Poll::Pending => waiting = true,
+            }
+        }
+        if waiting {
+            Poll::Pending
+        } else {
+            Poll::Ready(Err(last_err
+                .take()
+                .unwrap_or_else(|| anyhow!("no connection candidates"))))
+        }
+    })
+    .await
 }
 
 async fn connect_udp_candidates(

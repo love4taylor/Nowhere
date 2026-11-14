@@ -122,6 +122,7 @@ Portal listens on `ENDPOINT` and uses one fixed `out` for all Flows.
 |---|---|---|---|
 | `out` | `direct`, `egress` or `[USER:PASS@]HOST:PORT` | `direct` | Direct target access, registered Egress or a SOCKS5 upstream |
 | `prefer` | `ipv4`, `ipv6` or `default` | `default` | Address family tried first for DNS-resolved Portal outbound connections |
+| `tcp-concurrent` | `0` or `1` | `0` | Race all eligible DNS addresses for TCP Flows and use the first successful connection |
 | `tls` | `1` or `2` | `1` | Generated certificate (`1`) or supplied PEM files (`2`) for TLS and QUIC |
 | `crt` | Certificate-chain PEM path | Absent | Required exactly when `tls=2` |
 | `key` | Private-key PEM path | Absent | Required exactly when `tls=2` |
@@ -135,7 +136,7 @@ Portal listens on `ENDPOINT` and uses one fixed `out` for all Flows.
 | `etar` | `0..=2147483647` Mbps | `0` | Target-to-Vector download limit; `0` disables it |
 
 `out=egress` accepts Egress on any enabled TLS or QUIC listener and conflicts
-with explicit `dial`, `dial4`, `dial6` or `prefer`, including their default values.
+with explicit `dial`, `dial4`, `dial6`, `prefer` or `tcp-concurrent`, including their default values.
 See [Egress](egress.md) for registration and offline behavior.
 
 ### Target source selection
@@ -151,6 +152,27 @@ to the other family within the same dial timeout. `prefer=default` (or omission)
 preserves resolver order. Literal target IPs and source address restrictions
 still apply. With a SOCKS5 upstream, preference affects the proxy and UDP relay
 addresses resolved by Portal; target domains are sent to the proxy unchanged.
+
+`tcp-concurrent=1` starts TCP connection attempts to all eligible resolved
+addresses concurrently and uses the first success. Other attempts are closed
+when a winner is selected, the dial times out or the Flow is cancelled. DNS
+resolution and every attempt share the existing TCP dial timeout. Source address
+binding and family restrictions apply to each candidate. A literal target IP
+still produces a single attempt.
+
+With `prefer` also set, the preferred family is polled first, but both families
+race without a delay; either family can win. Leave `tcp-concurrent=0` (the default)
+to try addresses sequentially in preference order. UDP Flows, including SOCKS5
+UDP associations, retain their existing sequential setup.
+
+For a SOCKS5 upstream, the race uses the proxy's resolved addresses and a
+candidate succeeds after SOCKS authentication and CONNECT finish. Target domains
+remain unchanged for remote resolution by the proxy. Business payload is sent
+only through the winning connection.
+
+```sh
+nowhere "portal://KEY@*:2000?prefer=ipv6&tcp-concurrent=1"
+```
 
 A SOCKS5 upstream must support UDP ASSOCIATE to carry UDP Flows. Failure to
 establish that association fails the affected Flow.
@@ -259,6 +281,7 @@ A dash means that the role does not recognize the parameter.
 | `dial4` | IPv4 literal, `auto` | `auto` | Yes | — | Yes |
 | `dial6` | IPv6 literal, `auto` | `auto` | Yes | — | Yes |
 | `prefer` | `ipv4`, `ipv6`, `default` | `default` | Yes | — | — |
+| `tcp-concurrent` | `0`, `1` | `0` | Yes | — | — |
 | `morph` | `0`, `1` | `1` | Yes | Yes | Yes |
 | `grade` | `full`, `core` | `full` | Yes | Yes | Yes |
 | `cipher` | `chacha`, `aes` | `chacha` | Yes | Yes | Yes |

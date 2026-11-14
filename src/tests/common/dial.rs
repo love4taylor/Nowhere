@@ -18,7 +18,10 @@ impl From<&str> for DialPolicy {
 
 fn parse(query: &str) -> Result<DialPolicy> {
     let url = Url::parse(&format!("portal://key@localhost:2000?{query}"))?;
-    DialPolicy::from_query(&query_first(&url, &["dial", "dial4", "dial6", "prefer"])?)
+    DialPolicy::from_query(&query_first(
+        &url,
+        &["dial", "dial4", "dial6", "prefer", "tcp-concurrent"],
+    )?)
 }
 
 #[test]
@@ -137,4 +140,37 @@ fn address_preference_validates_values_and_first_duplicates() {
             "accepted {value}"
         );
     }
+}
+
+#[test]
+fn tcp_concurrent_validates_values_and_preserves_source_policy() {
+    for (query, concurrent) in [
+        ("", false),
+        ("tcp-concurrent=0", false),
+        ("tcp-concurrent=1", true),
+        ("tcp-concurrent=1&tcp-concurrent=%GG", true),
+        ("tcp-concurrent=0&tcp-concurrent=1", false),
+    ] {
+        assert_eq!(parse(query).unwrap().tcp_concurrent(), concurrent);
+    }
+    for value in ["", "true", "false", "2", "-1", "1%20", "%GG"] {
+        assert!(
+            parse(&format!("tcp-concurrent={value}")).is_err(),
+            "accepted {value}"
+        );
+    }
+    let policy = parse("dial=127.0.0.1&prefer=ipv6&tcp-concurrent=1").unwrap();
+    assert!(policy.tcp_concurrent());
+    assert_eq!(policy.preference(), AddressPreference::Ipv6);
+    assert_eq!(
+        policy.local_ip("192.0.2.1".parse().unwrap()).unwrap(),
+        Some("127.0.0.1".parse().unwrap())
+    );
+    assert!(!policy.accepts("::1".parse().unwrap()));
+    let dual = parse("dial4=127.0.0.1&dial6=::1&tcp-concurrent=1").unwrap();
+    assert!(dual.tcp_concurrent());
+    assert_eq!(
+        dual.local_ip("::1".parse().unwrap()).unwrap(),
+        Some("::1".parse().unwrap())
+    );
 }

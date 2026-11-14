@@ -53,7 +53,8 @@ nowhere "egress://KEY@relay.example/udp:2001?pin=TRUSTED_SHA256"
 ```
 
 Each Egress URL selects one carrier. `HOST:PORT` selects QUIC by default.
-Portal's `out=egress` conflicts with explicit `dial`, `dial4`, `dial6` and `prefer`;
+Portal's `out=egress` conflicts with explicit `dial`, `dial4`, `dial6`, `prefer`
+and `tcp-concurrent`;
 Egress applies those options only to targets. Certificate trust, address family,
 Morph and other options are described in [Configuration](configuration.md).
 

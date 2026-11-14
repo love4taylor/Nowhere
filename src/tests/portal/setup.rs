@@ -40,6 +40,18 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
             "?grade=core&cipher=aes",
             "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&grade=core&cipher=aes&rate=0&etar=0",
         ),
+        (
+            "?prefer=ipv4&tcp-concurrent=1",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&prefer=ipv4&tcp-concurrent=1&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
+        ),
+        (
+            "?tcp-concurrent=0",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
+        ),
+        (
+            "?out=localhost:1080&tcp-concurrent=1",
+            "portal://127.0.0.1:2000?out=localhost:1080&tls=1&dial=auto&tcp-concurrent=1&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
+        ),
     ] {
         let portal = Portal::new(
             Url::parse(&format!(
@@ -61,6 +73,24 @@ fn egress_output_rejects_portal_address_preference() {
         ))
         .unwrap();
         assert!(Portal::new(url, Logger).is_err());
+    }
+}
+
+#[test]
+fn portal_rejects_invalid_or_egress_tcp_concurrent_settings() {
+    for query in [
+        "tcp-concurrent=",
+        "tcp-concurrent=true",
+        "tcp-concurrent=2",
+        "tcp-concurrent=%GG",
+        "out=egress&tcp-concurrent=0",
+        "out=egress&tcp-concurrent=1",
+    ] {
+        let url = Url::parse(&format!(
+            "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?{query}"
+        ))
+        .unwrap();
+        assert!(Portal::new(url, Logger).is_err(), "accepted {query}");
     }
 }
 

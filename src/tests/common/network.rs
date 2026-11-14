@@ -5,6 +5,110 @@
 
 use super::*;
 
+struct AttemptGuard(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_attempts_skip_failures_and_release_losers_on_success() {
+    let started = std::rc::Rc::new(std::cell::Cell::new(0));
+    let dropped = std::rc::Rc::new(std::cell::Cell::new(0));
+    let attempts = (0..3).map(|index| {
+        let started = started.clone();
+        let dropped = dropped.clone();
+        async move {
+            let _guard = AttemptGuard(dropped);
+            started.set(started.get() + 1);
+            match index {
+                0 => std::future::pending::<Result<usize>>().await,
+                1 => Err(anyhow!("refused")),
+                _ => Ok(index),
+            }
+        }
+    });
+    assert_eq!(first_success(attempts).await.unwrap(), 2);
+    assert_eq!(started.get(), 3);
+    assert_eq!(dropped.get(), 3);
+}
+
+#[tokio::test]
+async fn concurrent_attempts_release_every_candidate_on_timeout() {
+    let dropped = std::rc::Rc::new(std::cell::Cell::new(0));
+    let attempts = (0..3).map(|_| {
+        let dropped = dropped.clone();
+        async move {
+            let _guard = AttemptGuard(dropped);
+            std::future::pending::<Result<()>>().await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), first_success(attempts))
+            .await
+            .is_err()
+    );
+    assert_eq!(dropped.get(), 3);
+}
+
+#[tokio::test]
+async fn concurrent_attempts_report_empty_and_all_failed_candidates() {
+    let empty = std::iter::empty::<std::future::Ready<Result<()>>>();
+    assert!(first_success(empty).await.is_err());
+    let attempts = (0..3).map(|index| std::future::ready(Err::<(), _>(anyhow!("refused {index}"))));
+    assert!(first_success(attempts).await.is_err());
+}
+
+#[tokio::test]
+async fn concurrent_tcp_uses_family_specific_sources_and_skips_bind_failures() {
+    let policy = DialPolicy::from_query(&std::collections::HashMap::from([
+        ("tcp-concurrent".to_owned(), "1".to_owned()),
+        ("prefer".to_owned(), "ipv6".to_owned()),
+        ("dial4".to_owned(), "127.0.0.1".to_owned()),
+        ("dial6".to_owned(), "2001:db8::dead".to_owned()),
+    ]))
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stream = tokio::time::timeout(
+        Duration::from_secs(2),
+        connect_tcp_candidates(
+            &policy,
+            vec![
+                SocketAddr::new("::1".parse().unwrap(), address.port()),
+                address,
+            ],
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(stream.peer_addr().unwrap(), address);
+    assert_eq!(stream.local_addr().unwrap().ip(), address.ip());
+    drop(stream);
+    let stream = dial_tcp_with_policy(
+        &policy,
+        &format!("localhost:{}", address.port()),
+        Duration::from_secs(2),
+        AddressFamily::Any,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stream.peer_addr().unwrap(), address);
+    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let socket = dial_udp_with_policy(
+        &policy,
+        &format!("localhost:{}", udp.local_addr().unwrap().port()),
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(socket.peer_addr().unwrap(), udp.local_addr().unwrap());
+    assert_eq!(socket.local_addr().unwrap().ip(), address.ip());
+}
+
 #[test]
 fn bind_udp_addrs_handles_wildcard_and_ip_literals() {
     assert_eq!(
@@ -140,6 +244,7 @@ async fn dual_stack_binds_tcp_and_udp_sources_for_domain_and_ip_targets() {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: Some("::1".parse().unwrap()),
         preference: crate::common::AddressPreference::Default,
+        tcp_concurrent: false,
     };
     let listener4 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listener6 = match tokio::net::TcpListener::bind("[::1]:0").await {
@@ -202,6 +307,7 @@ async fn failed_explicit_source_tries_the_other_family_without_auto_fallback() {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: Some("2001:db8::dead".parse().unwrap()),
         preference: crate::common::AddressPreference::Default,
+        tcp_concurrent: false,
     };
     let failed = SocketAddr::new("::1".parse().unwrap(), target.port());
     let stream = connect_tcp_candidates(&policy, vec![failed, target])
@@ -216,6 +322,7 @@ async fn failed_explicit_source_tries_the_other_family_without_auto_fallback() {
         v4: Some("192.0.2.254".parse().unwrap()),
         v6: None,
         preference: crate::common::AddressPreference::Default,
+        tcp_concurrent: false,
     };
     assert!(connect_tcp_candidates(&policy, vec![target]).await.is_err());
     assert!(
@@ -240,6 +347,7 @@ async fn dual_stack_udp_domain_binds_source_for_the_resolved_family() {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: v6.as_ref().map(|_| "::1".parse().unwrap()),
         preference: crate::common::AddressPreference::Default,
+        tcp_concurrent: false,
     };
     let socket = dial_udp_with_policy(
         &policy,
