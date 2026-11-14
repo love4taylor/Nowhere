@@ -7,6 +7,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use hickory_net::proto::op::Query;
+use hickory_net::proto::rr::{Name, RecordType};
 use rustls::pki_types::ServerName;
 use url::Url;
 
@@ -22,6 +24,7 @@ pub(crate) const PARAMETERS: &[&str] = &[
     "dns-timeout",
     "dns-fallback-delay",
     "dns-probe-interval",
+    "dns-probe-target",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +106,7 @@ pub(crate) struct DnsConfig {
     pub(super) timeout: Duration,
     pub(super) fallback_delay: Duration,
     pub(super) probe_interval: Duration,
+    pub(super) probe_target: Query,
 }
 
 impl DnsConfig {
@@ -172,6 +176,18 @@ impl DnsConfig {
         if fallback_delay >= timeout {
             bail!("dns-fallback-delay must be less than dns-timeout");
         }
+        let probe_name = query.get("dns-probe-target").map_or(".", String::as_str);
+        if probe_name.is_empty() {
+            bail!("dns-probe-target must be a DNS name");
+        }
+        let mut probe_name =
+            Name::from_ascii(probe_name).context("invalid dns-probe-target DNS name")?;
+        probe_name.set_fqdn(true);
+        let probe_type = if probe_name.is_root() {
+            RecordType::NS
+        } else {
+            RecordType::A
+        };
         Ok(Some(Self {
             primary,
             fallback,
@@ -192,6 +208,7 @@ impl DnsConfig {
                 Duration::from_millis(10),
                 Duration::from_secs(60),
             )?,
+            probe_target: Query::query(probe_name, probe_type),
         }))
     }
 

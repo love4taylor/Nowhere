@@ -5,6 +5,7 @@
 
 mod cache;
 mod config;
+mod health;
 mod hijack;
 mod https;
 mod stats;
@@ -289,8 +290,8 @@ impl DnsResolver {
         let work = async {
             let (mut candidates, degraded): (Vec<_>, Vec<_>) = (0..self.upstreams.len())
                 .partition(|index| !self.upstreams[*index].unhealthy.load(Ordering::Relaxed));
-            // Working alternatives avoid degraded candidates entirely; if they stall/fail too,
-            // permit requests to discover recovery without waiting for the next periodic probe.
+            // Working alternatives precede degraded candidates. A degraded candidate
+            // can still answer if alternatives fail; only a target probe restores health.
             candidates.extend(degraded);
             let mut candidates = candidates.into_iter();
             let mut attempts = FuturesUnordered::<Attempt>::new();
@@ -328,7 +329,7 @@ impl DnsResolver {
                     }
                     _ = &mut timer, if next.is_some() => {
                         for (index, pending) in pending.iter().enumerate() {
-                            if *pending { self.upstreams[index].mark_unhealthy(); }
+                            if *pending { self.upstreams[index].request_probe(); }
                         }
                         let index = next.take().unwrap();
                         launch(index, &mut attempts); pending[index] = true;
@@ -355,24 +356,45 @@ impl DnsResolver {
 
     fn start_probes(self: &Arc<Self>) {
         self.probes.get_or_init(|| {
+            let weak = Arc::downgrade(self);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(health::POLL_INTERVAL).await;
+                    let Some(resolver) = weak.upgrade() else {
+                        break;
+                    };
+                    for upstream in &resolver.upstreams {
+                        upstream.report_health();
+                    }
+                }
+            });
             for index in 0..self.upstreams.len() {
                 let weak = Arc::downgrade(self);
+                let weak_upstream = Arc::downgrade(&self.upstreams[index]);
                 let interval = self.config.probe_interval;
                 tokio::spawn(async move {
                     loop {
-                        tokio::time::sleep(interval).await;
+                        let Some(upstream) = weak_upstream.upgrade() else {
+                            break;
+                        };
+                        if !upstream.unhealthy.load(Ordering::Relaxed)
+                            && !upstream.probe_needed.load(Ordering::Relaxed)
+                        {
+                            tokio::select! {
+                                _ = tokio::time::sleep(interval) => {},
+                                _ = upstream.probe_wakeup.notified() => {},
+                            }
+                        }
                         let Some(resolver) = weak.upgrade() else {
                             break;
                         };
-                        let upstream = &resolver.upstreams[index];
-                        if !upstream.unhealthy.load(Ordering::Relaxed) {
+                        let requested = upstream.probe_needed.swap(false, Ordering::Relaxed);
+                        if !requested && !upstream.unhealthy.load(Ordering::Relaxed) {
                             continue;
                         }
                         let mut probe = Message::query();
                         probe.metadata.recursion_desired = true;
-                        probe
-                            .queries
-                            .push(Query::query(Name::root(), RecordType::NS));
+                        probe.queries.push(resolver.config.probe_target.clone());
                         let budget = resolver
                             .config
                             .fallback_delay
@@ -384,6 +406,10 @@ impl DnsResolver {
                         {
                             upstream.mark_unhealthy();
                         }
+                        // Bound target traffic even when many client queries keep failing.
+                        drop(resolver);
+                        drop(upstream);
+                        tokio::time::sleep(interval).await;
                     }
                 });
             }

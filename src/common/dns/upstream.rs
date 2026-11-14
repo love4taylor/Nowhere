@@ -17,12 +17,13 @@ use hickory_net::runtime::{RuntimeProvider, Spawn, TokioRuntimeProvider};
 use hickory_net::xfer::{DnsExchange, DnsMultiplexer};
 use rustls::pki_types::ServerName;
 use tokio::net::lookup_host;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 
-use crate::common::{AddressFamily, DialPolicy, Logger, filter_addrs_for_family};
+use crate::common::{AddressFamily, DialPolicy, filter_addrs_for_family};
 
 use super::config::{Transport, UpstreamConfig};
+use super::health::HealthLog;
 use super::https::HttpsSession;
 
 #[derive(Default)]
@@ -58,6 +59,9 @@ pub(super) struct Upstream {
     // Keep the provider alive: it owns the encrypted sessions' background tasks.
     provider: TokioRuntimeProvider,
     counters: Counters,
+    health_log: std::sync::Mutex<HealthLog>,
+    pub(super) probe_needed: AtomicBool,
+    pub(super) probe_wakeup: Notify,
 }
 
 impl Upstream {
@@ -78,21 +82,43 @@ impl Upstream {
             provider: TokioRuntimeProvider::new(),
             unhealthy: AtomicBool::new(false),
             counters: Counters::default(),
+            health_log: std::sync::Mutex::new(HealthLog::default()),
+            probe_needed: AtomicBool::new(false),
+            probe_wakeup: Notify::new(),
         }
     }
 
     pub(super) fn mark_unhealthy(&self) {
-        if !self.unhealthy.swap(true, Ordering::Relaxed) {
-            Logger.info(format_args!(
-                "dns upstream {} degraded; enabling fallback/probes",
-                self.index
-            ));
+        let mut log = self.health_log.lock().unwrap();
+        self.unhealthy.store(true, Ordering::Relaxed);
+        log.degrade(Instant::now());
+    }
+
+    fn mark_healthy(&self) {
+        let mut log = self.health_log.lock().unwrap();
+        self.unhealthy.store(false, Ordering::Relaxed);
+        if let Some(notice) = log.recover(Instant::now()) {
+            notice.log(self.index);
+        }
+    }
+
+    pub(super) fn report_health(&self) {
+        let mut log = self.health_log.lock().unwrap();
+        if let Some(notice) = log.poll(Instant::now()) {
+            notice.log(self.index);
         }
     }
 
     pub(super) fn mark_timed_out(&self) {
         self.counters.failures.fetch_add(1, Ordering::Relaxed);
-        self.mark_unhealthy();
+        self.request_probe();
+    }
+
+    pub(super) fn request_probe(&self) {
+        // Deduplicate overlapping slow/failed queries into one pending health test.
+        if !self.probe_needed.swap(true, Ordering::Relaxed) {
+            self.probe_wakeup.notify_one();
+        }
     }
 
     pub(super) async fn query(&self, request: &Message) -> Result<Message> {
@@ -111,17 +137,34 @@ impl Upstream {
             &self.counters.queries
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        let result = tokio::time::timeout(self.timeout, self.query_inner(request))
+        let mut result = tokio::time::timeout(self.timeout, self.query_inner(request))
             .await
             .context("DNS upstream timeout")
             .and_then(|result| result);
+        if probe
+            && result.as_ref().is_ok_and(|response| {
+                response.metadata.response_code != ResponseCode::NoError
+                    || !response
+                        .answers
+                        .iter()
+                        .any(|record| record.data.record_type() == request.queries[0].query_type())
+            })
+        {
+            result = Err(anyhow!("DNS health target returned no requested records"));
+        }
         if result.is_err() {
             if !probe {
                 self.counters.failures.fetch_add(1, Ordering::Relaxed);
             }
-            self.mark_unhealthy();
-        } else if self.unhealthy.swap(false, Ordering::Relaxed) {
-            Logger.info(format_args!("dns upstream {} recovered", self.index));
+            if probe {
+                self.mark_unhealthy();
+            } else {
+                // Client errors, transport failures and slow answers trigger a separate
+                // health test; only that test may change global routing health.
+                self.request_probe();
+            }
+        } else if probe {
+            self.mark_healthy();
         }
         if !probe && result.is_ok() {
             self.counters.last_latency_us.store(
@@ -212,9 +255,14 @@ impl Upstream {
             if !matches!(
                 response.metadata.response_code,
                 ResponseCode::NoError | ResponseCode::NXDomain
-            ) || response.metadata.truncation
-            {
-                bail!("DNS upstream failed: {:?}", response.metadata.response_code);
+            ) {
+                bail!(
+                    "DNS upstream rejected query: {:?}",
+                    response.metadata.response_code
+                );
+            }
+            if response.metadata.truncation {
+                bail!("encrypted DNS upstream returned a truncated response");
             }
             return Ok(response);
         }

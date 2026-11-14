@@ -33,7 +33,7 @@ async fn snapshots_are_passive_and_expose_only_upstream_transport_host_and_port(
 async fn telemetry_distinguishes_current_health_last_winner_cache_and_recovery_probes() {
     let primary = TestServer::new("tls").await;
     let fallback = TestServer::new("https").await;
-    primary.mode.store(2, Ordering::Relaxed);
+    primary.mode.store(4, Ordering::Relaxed);
     let resolver =
         primary.resolver_with_fallback(Some(&fallback), &[("dns-probe-interval", "60s")]);
     assert_eq!(
@@ -50,6 +50,13 @@ async fn telemetry_distinguishes_current_health_last_winner_cache_and_recovery_p
             .len(),
         1
     );
+    tokio::time::timeout(Duration::from_millis(250), async {
+        while !resolver.upstreams[0].unhealthy.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
     let snapshot = resolver.snapshot();
     assert_eq!(snapshot.queries, 2);
     assert_eq!(snapshot.cache_hits, 1);
@@ -81,7 +88,7 @@ async fn telemetry_distinguishes_current_health_last_winner_cache_and_recovery_p
         "probes are separate from logical queries"
     );
     assert_eq!(recovered.upstreams[0].queries, 1);
-    assert_eq!(recovered.upstreams[0].probes, 1);
+    assert_eq!(recovered.upstreams[0].probes, 2);
     assert!(recovered.upstreams[0].last_latency_us.is_none());
     assert_eq!(
         ask(&resolver, "recovered-stats.test.", 3)
@@ -111,6 +118,13 @@ async fn failed_resolution_and_malformed_hijacked_packets_have_distinct_counts()
     let malformed =
         Message::from_vec(&resolver.answer(&[0x12, 0x34], true).await.unwrap()).unwrap();
     assert_eq!(malformed.metadata.response_code, ResponseCode::FormErr);
+    tokio::time::timeout(Duration::from_millis(250), async {
+        while !resolver.upstreams[0].unhealthy.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
     let snapshot = resolver.snapshot();
     assert_eq!(snapshot.queries, 1);
     assert_eq!(snapshot.failures, 1);

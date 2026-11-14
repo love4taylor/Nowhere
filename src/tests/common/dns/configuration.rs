@@ -18,6 +18,16 @@ fn validates_encrypted_upstreams_bounds_and_explicit_enablement() {
     assert_eq!(config.primary.len(), 3);
     assert_eq!(config.fallback_delay, Duration::from_millis(50));
     assert_eq!(config.probe_interval, Duration::from_millis(250));
+    assert!(config.probe_target.name().is_root());
+    assert_eq!(config.probe_target.query_type(), RecordType::NS);
+    let configured = parse(&[
+        ("dns", "tls://1.1.1.1"),
+        ("dns-probe-target", "example.com"),
+    ])
+    .unwrap()
+    .unwrap();
+    assert_eq!(configured.probe_target.name().to_ascii(), "example.com.");
+    assert_eq!(configured.probe_target.query_type(), RecordType::A);
     for bad in [
         "",
         "udp://1.1.1.1",
@@ -39,6 +49,8 @@ fn validates_encrypted_upstreams_bounds_and_explicit_enablement() {
         ("dns-cache-bytes", "67108865"),
         ("dns-stale", "2days"),
         ("dns-probe-interval", "1ms"),
+        ("dns-probe-target", ""),
+        ("dns-probe-target", "bad..name"),
         ("dns-timeout", "999days"),
         ("dns-fallback-delay", "2s"),
         ("dns-fallback", ""),
