@@ -43,6 +43,14 @@ cargo build --release --locked
 cargo test --all-targets --locked
 ```
 
+The executable uses statically linked mimalloc 3.6.1 for Rust allocations on all
+release targets, including musl container builds. No allocator shared library or
+`LD_PRELOAD` setting is required. Native dependencies retain their own allocation
+APIs, and applications embedding the Rust library choose their own global allocator.
+The library test suite uses mimalloc as well.
+The C sources are pinned through a local `libmimalloc-sys` patch; provenance,
+licenses and update instructions are in [the vendor note](../vendor/libmimalloc-sys/README.nowhere.md).
+
 ## Network exposure
 
 Portal binds one socket for every address selected by each declared carrier.
