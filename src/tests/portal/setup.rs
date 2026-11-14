@@ -30,6 +30,18 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
             "?morph=0",
             "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=0&rate=0&etar=0",
         ),
+        (
+            "?prefer=ipv6",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&prefer=ipv6&morph=1&rate=0&etar=0",
+        ),
+        (
+            "?prefer=ipv4",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&prefer=ipv4&morph=1&rate=0&etar=0",
+        ),
+        (
+            "?prefer=default",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&rate=0&etar=0",
+        ),
     ] {
         let portal = Portal::new(
             Url::parse(&format!(
@@ -55,6 +67,17 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
             portal.inner.morph_keys.is_some(),
             !query.contains("morph=0")
         );
+    }
+}
+
+#[test]
+fn egress_output_rejects_portal_address_preference() {
+    for value in ["default", "ipv4", "ipv6"] {
+        let url = Url::parse(&format!(
+            "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?out=egress&prefer={value}"
+        ))
+        .unwrap();
+        assert!(Portal::new(url, Logger).is_err());
     }
 }
 

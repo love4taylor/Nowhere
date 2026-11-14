@@ -9,23 +9,44 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Result, bail};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AddressPreference {
+    #[default]
+    Default,
+    Ipv4,
+    Ipv6,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DialPolicy {
-    SingleSource(Option<IpAddr>),
+    SingleSource {
+        source: Option<IpAddr>,
+        preference: AddressPreference,
+    },
     DualStack {
         v4: Option<Ipv4Addr>,
         v6: Option<Ipv6Addr>,
+        preference: AddressPreference,
     },
 }
 
 impl Default for DialPolicy {
     fn default() -> Self {
-        Self::SingleSource(None)
+        Self::SingleSource {
+            source: None,
+            preference: AddressPreference::Default,
+        }
     }
 }
 
 impl DialPolicy {
     pub(crate) fn from_query(query: &HashMap<String, String>) -> Result<Self> {
+        let preference = match query.get("prefer").map(String::as_str) {
+            None | Some("default") => AddressPreference::Default,
+            Some("ipv4") => AddressPreference::Ipv4,
+            Some("ipv6") => AddressPreference::Ipv6,
+            Some(_) => bail!("prefer must be ipv4, ipv6 or default"),
+        };
         let dial = query.get("dial");
         let has_families = query.contains_key("dial4") || query.contains_key("dial6");
         if dial.is_some() && has_families {
@@ -52,22 +73,31 @@ impl DialPolicy {
                     Some(ip)
                 }
             };
-            Ok(Self::DualStack { v4, v6 })
+            Ok(Self::DualStack { v4, v6, preference })
         } else {
             match dial.map(String::as_str) {
-                None | Some("auto") => Ok(Self::default()),
-                Some(value) => {
-                    Ok(Self::SingleSource(Some(value.parse::<IpAddr>().map_err(
-                        |_| anyhow::anyhow!("dial must be auto or an IP literal"),
-                    )?)))
-                }
+                None | Some("auto") => Ok(Self::SingleSource {
+                    source: None,
+                    preference,
+                }),
+                Some(value) => Ok(Self::SingleSource {
+                    source: Some(
+                        value
+                            .parse::<IpAddr>()
+                            .map_err(|_| anyhow::anyhow!("dial must be auto or an IP literal"))?,
+                    ),
+                    preference,
+                }),
             }
         }
     }
 
     pub(crate) fn accepts(&self, target: IpAddr) -> bool {
         match self {
-            Self::SingleSource(Some(source)) => source.is_ipv4() == target.is_ipv4(),
+            Self::SingleSource {
+                source: Some(source),
+                ..
+            } => source.is_ipv4() == target.is_ipv4(),
             _ => true,
         }
     }
@@ -77,22 +107,30 @@ impl DialPolicy {
             bail!("target address family conflicts with dial");
         }
         Ok(match self {
-            Self::SingleSource(source) => *source,
+            Self::SingleSource { source, .. } => *source,
             Self::DualStack { v4, .. } if target.is_ipv4() => v4.map(IpAddr::V4),
             Self::DualStack { v6, .. } => v6.map(IpAddr::V6),
         })
+    }
+
+    pub(crate) fn preference(&self) -> AddressPreference {
+        match self {
+            Self::SingleSource { preference, .. } | Self::DualStack { preference, .. } => {
+                *preference
+            }
+        }
     }
 }
 
 impl fmt::Display for DialPolicy {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::SingleSource(source) => write!(
+            Self::SingleSource { source, .. } => write!(
                 formatter,
                 "dial={}",
                 source.map_or_else(|| "auto".to_owned(), |ip| ip.to_string())
             ),
-            Self::DualStack { v4, v6 } => write!(
+            Self::DualStack { v4, v6, .. } => write!(
                 formatter,
                 "dial4={} dial6={}",
                 v4.map_or_else(|| "auto".to_owned(), |ip| ip.to_string()),

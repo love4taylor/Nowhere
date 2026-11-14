@@ -41,6 +41,33 @@ fn bind_udp_addrs_handles_wildcard_and_ip_literals() {
 }
 
 #[test]
+fn preferred_family_orders_candidates_without_reordering_each_family() {
+    let addresses = [
+        "192.0.2.1:80".parse().unwrap(),
+        "[2001:db8::1]:80".parse().unwrap(),
+        "192.0.2.2:80".parse().unwrap(),
+        "[2001:db8::2]:80".parse().unwrap(),
+    ];
+    for (value, indices) in [
+        ("default", [0, 1, 2, 3]),
+        ("ipv4", [0, 2, 1, 3]),
+        ("ipv6", [1, 3, 0, 2]),
+    ] {
+        let policy = DialPolicy::from_query(&std::collections::HashMap::from([(
+            "prefer".to_owned(),
+            value.to_owned(),
+        )]))
+        .unwrap();
+        let ordered =
+            filter_addrs_for_family(addresses.iter().copied(), &policy, AddressFamily::Any);
+        assert_eq!(ordered, indices.map(|index| addresses[index]));
+        let filtered =
+            filter_addrs_for_family(addresses.iter().copied(), &policy, AddressFamily::V4);
+        assert_eq!(filtered, [addresses[0], addresses[2]]);
+    }
+}
+
+#[test]
 fn filter_addrs_matches_local_ip_family() {
     let addrs = [
         SocketAddr::from(([127, 0, 0, 1], 443)),
@@ -112,6 +139,7 @@ async fn dual_stack_binds_tcp_and_udp_sources_for_domain_and_ip_targets() {
     let policy = DialPolicy::DualStack {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: Some("::1".parse().unwrap()),
+        preference: crate::common::AddressPreference::Default,
     };
     let listener4 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listener6 = match tokio::net::TcpListener::bind("[::1]:0").await {
@@ -173,6 +201,7 @@ async fn failed_explicit_source_tries_the_other_family_without_auto_fallback() {
     let policy = DialPolicy::DualStack {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: Some("2001:db8::dead".parse().unwrap()),
+        preference: crate::common::AddressPreference::Default,
     };
     let failed = SocketAddr::new("::1".parse().unwrap(), target.port());
     let stream = connect_tcp_candidates(&policy, vec![failed, target])
@@ -186,6 +215,7 @@ async fn failed_explicit_source_tries_the_other_family_without_auto_fallback() {
     let policy = DialPolicy::DualStack {
         v4: Some("192.0.2.254".parse().unwrap()),
         v6: None,
+        preference: crate::common::AddressPreference::Default,
     };
     assert!(connect_tcp_candidates(&policy, vec![target]).await.is_err());
     assert!(
@@ -209,6 +239,7 @@ async fn dual_stack_udp_domain_binds_source_for_the_resolved_family() {
     let policy = DialPolicy::DualStack {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: v6.as_ref().map(|_| "::1".parse().unwrap()),
+        preference: crate::common::AddressPreference::Default,
     };
     let socket = dial_udp_with_policy(
         &policy,

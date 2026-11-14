@@ -18,7 +18,7 @@ impl From<&str> for DialPolicy {
 
 fn parse(query: &str) -> Result<DialPolicy> {
     let url = Url::parse(&format!("portal://key@localhost:2000?{query}"))?;
-    DialPolicy::from_query(&query_first(&url, &["dial", "dial4", "dial6"])?)
+    DialPolicy::from_query(&query_first(&url, &["dial", "dial4", "dial6", "prefer"])?)
 }
 
 #[test]
@@ -117,4 +117,24 @@ fn first_duplicate_is_selected_even_when_later_values_are_invalid() {
     );
     assert!(parse("dial4=bad&dial4=auto").is_err());
     assert!(parse("dial=auto&dial=auto&dial4=auto").is_err());
+}
+
+#[test]
+fn address_preference_validates_values_and_first_duplicates() {
+    for (query, expected) in [
+        ("", AddressPreference::Default),
+        ("prefer=default", AddressPreference::Default),
+        ("prefer=ipv4", AddressPreference::Ipv4),
+        ("prefer=ipv6", AddressPreference::Ipv6),
+        ("prefer=ipv6&prefer=%GG", AddressPreference::Ipv6),
+        ("dial4=127.0.0.1&prefer=ipv6", AddressPreference::Ipv6),
+    ] {
+        assert_eq!(parse(query).unwrap().preference(), expected);
+    }
+    for value in ["", "auto", "4", "6", "IPv4", "ipv6%20", "%GG"] {
+        assert!(
+            parse(&format!("prefer={value}")).is_err(),
+            "accepted {value}"
+        );
+    }
 }

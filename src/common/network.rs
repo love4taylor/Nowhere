@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket, lookup_host};
 
-use super::{AddressFamily, CarrierEndpoint, DialPolicy};
+use super::{AddressFamily, AddressPreference, CarrierEndpoint, DialPolicy};
 
 pub(crate) fn configure_tcp_listener(socket: &socket2::Socket) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -171,9 +171,15 @@ pub(crate) fn filter_addrs_for_family(
     policy: &DialPolicy,
     family: AddressFamily,
 ) -> Vec<SocketAddr> {
-    addrs
+    let mut addresses: Vec<_> = addrs
         .filter(|addr| policy.accepts(addr.ip()) && family.accepts(addr.ip()))
-        .collect()
+        .collect();
+    match policy.preference() {
+        AddressPreference::Default => {}
+        AddressPreference::Ipv4 => addresses.sort_by_key(|addr| !addr.is_ipv4()),
+        AddressPreference::Ipv6 => addresses.sort_by_key(|addr| !addr.is_ipv6()),
+    }
+    addresses
 }
 
 pub(super) async fn connect_tcp_addr(
