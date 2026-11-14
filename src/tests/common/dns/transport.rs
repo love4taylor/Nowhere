@@ -7,9 +7,9 @@ use super::*;
 
 #[tokio::test]
 async fn doh_dot_doq_validate_certificates_reuse_sessions_and_resolve_both_families() {
-    for transport in ["https", "tls", "quic"] {
+    for transport in ["https", "h3", "tls", "quic"] {
         let server = TestServer::new(transport).await;
-        let resolver = server.resolver(&[]);
+        let resolver = server.resolver(&[("dns-http-pool-size", "1")]);
         for id in [101, 102] {
             let response = ask(&resolver, &format!("unique{id}.test."), id).await;
             assert_eq!(response.metadata.id, id, "{transport}");
@@ -378,17 +378,19 @@ async fn doh_rejects_http_errors_and_wrong_mime_and_subtracts_http_age_from_ttls
 
 #[tokio::test]
 async fn doh_ip_url_and_nonstandard_port_keep_correct_tls_identity_and_authority() {
-    let mut server = TestServer::new("https").await;
-    let mut url = url::Url::parse(&server.url).unwrap();
-    url.set_host(Some("127.0.0.1")).unwrap();
-    server.url = url.to_string();
-    assert_eq!(
-        ask(&server.resolver(&[]), "ip-url.test.", 1)
-            .await
-            .answers
-            .len(),
-        1
-    );
+    for transport in ["https", "h3"] {
+        let mut server = TestServer::new(transport).await;
+        let mut url = url::Url::parse(&server.url).unwrap();
+        url.set_host(Some("127.0.0.1")).unwrap();
+        server.url = url.to_string();
+        assert_eq!(
+            ask(&server.resolver(&[]), "ip-url.test.", 1)
+                .await
+                .answers
+                .len(),
+            1
+        );
+    }
 }
 
 #[tokio::test]

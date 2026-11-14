@@ -15,6 +15,8 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["std", "async-await"] }
 getrandom = "0.4.3"
 h2 = "0.4.15"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 hickory-net = { version = "0.26.3", default-features = false, features = ["quic-ring"] }
 hmac = "0.13.0"
 http = "1.5.0"

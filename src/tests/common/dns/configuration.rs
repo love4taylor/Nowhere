@@ -20,6 +20,21 @@ fn validates_encrypted_upstreams_bounds_and_explicit_enablement() {
     assert_eq!(config.probe_interval, Duration::from_millis(250));
     assert!(config.probe_target.name().is_root());
     assert_eq!(config.probe_target.query_type(), RecordType::NS);
+    assert_eq!(config.http.pool_size, 2);
+    assert_eq!(config.http.keepalive, Duration::from_secs(30));
+    assert_eq!(config.http.ping_timeout, Duration::from_secs(5));
+    assert!(config.http.prewarm);
+    let http3 = parse(&[
+        ("dns", "h3://[::1]:4443/custom?bootstrap=::1"),
+        ("dns-http-prewarm", "0"),
+        ("dns-http-pool-size", "4"),
+    ])
+    .unwrap()
+    .unwrap();
+    assert_eq!(http3.primary[0].transport, config::Transport::Http3);
+    assert_eq!(http3.primary[0].path, "/custom");
+    assert_eq!(http3.primary[0].port, 4443);
+    assert!(!http3.http.prewarm);
     let configured = parse(&[
         ("dns", "tls://1.1.1.1"),
         ("dns-probe-target", "example.com"),
@@ -54,6 +69,13 @@ fn validates_encrypted_upstreams_bounds_and_explicit_enablement() {
         ("dns-timeout", "999days"),
         ("dns-fallback-delay", "2s"),
         ("dns-fallback", ""),
+        ("dns-http-pool-size", "0"),
+        ("dns-http-pool-size", "5"),
+        ("dns-http-keepalive", "1ms"),
+        ("dns-http-keepalive", "601s"),
+        ("dns-http-ping-timeout", "1ms"),
+        ("dns-http-ping-timeout", "61s"),
+        ("dns-http-prewarm", "true"),
     ] {
         assert!(
             parse(&[("dns", "tls://1.1.1.1"), pair]).is_err(),

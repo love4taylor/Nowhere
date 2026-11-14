@@ -21,6 +21,8 @@ fn instance_ids_are_random_lowercase_hex() {
 fn dns_endpoints_preserve_identity_without_paths_queries_credentials_or_terminal_controls() {
     for (input, expected) in [
         ("https://dns.example:443", "https://dns.example:443"),
+        ("h3://dns.example", "h3://dns.example:443"),
+        ("h3://[::1]:4443", "h3://[::1]:4443"),
         ("tls://1.1.1.1:853", "tls://1.1.1.1:853"),
         ("quic://[::1]:8853", "quic://[::1]:8853"),
     ] {
@@ -35,6 +37,12 @@ fn dns_endpoints_preserve_identity_without_paths_queries_credentials_or_terminal
         "https://dns.example:0",
         "https://dns.example\nforged",
         "https://dns.example/\u{1b}[31m",
+        "h3://user:password@dns.example/",
+        "h3://dns.example/private-id",
+        "h3://dns.example?bootstrap=192.0.2.1",
+        "h3://dns.example#private-id",
+        "h3://dns.example:0",
+        "h3://dns.example\nforged",
     ] {
         assert_eq!(dns_endpoint(input), "<redacted>", "{input:?}");
     }

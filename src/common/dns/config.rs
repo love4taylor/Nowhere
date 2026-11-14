@@ -25,11 +25,16 @@ pub(crate) const PARAMETERS: &[&str] = &[
     "dns-fallback-delay",
     "dns-probe-interval",
     "dns-probe-target",
+    "dns-http-pool-size",
+    "dns-http-keepalive",
+    "dns-http-ping-timeout",
+    "dns-http-prewarm",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Transport {
     Https,
+    Http3,
     Tls,
     Quic,
 }
@@ -48,9 +53,12 @@ impl UpstreamConfig {
         let url = Url::parse(raw).context("invalid DNS upstream URL")?;
         let (transport, default_port) = match url.scheme() {
             "https" => (Transport::Https, 443),
+            "h3" => (Transport::Http3, 443),
             "tls" => (Transport::Tls, 853),
             "quic" => (Transport::Quic, 853),
-            _ => bail!("DNS upstream requires https:// (DoH), tls:// (DoT) or quic:// (DoQ)"),
+            _ => bail!(
+                "DNS upstream requires https:// (DoH/H2), h3:// (DoH/H3), tls:// (DoT) or quic:// (DoQ)"
+            ),
         };
         if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
             bail!("DNS upstream must not contain credentials or a fragment");
@@ -66,7 +74,9 @@ impl UpstreamConfig {
         if port == 0 {
             bail!("DNS upstream port must be nonzero");
         }
-        if transport != Transport::Https && !matches!(url.path(), "" | "/") {
+        if !matches!(transport, Transport::Https | Transport::Http3)
+            && !matches!(url.path(), "" | "/")
+        {
             bail!("DoT/DoQ upstream must not contain a path");
         }
         let mut bootstrap = None;
@@ -80,7 +90,9 @@ impl UpstreamConfig {
                     .context("DNS bootstrap must be an IP literal")?,
             );
         }
-        let path = if transport == Transport::Https && matches!(url.path(), "" | "/") {
+        let path = if matches!(transport, Transport::Https | Transport::Http3)
+            && matches!(url.path(), "" | "/")
+        {
             "/dns-query".to_owned()
         } else {
             url.path().to_owned()
@@ -96,6 +108,14 @@ impl UpstreamConfig {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct HttpOptions {
+    pub(super) pool_size: usize,
+    pub(super) keepalive: Duration,
+    pub(super) ping_timeout: Duration,
+    pub(super) prewarm: bool,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct DnsConfig {
     pub(super) primary: Vec<UpstreamConfig>,
     pub(super) fallback: Vec<UpstreamConfig>,
@@ -107,6 +127,7 @@ pub(crate) struct DnsConfig {
     pub(super) fallback_delay: Duration,
     pub(super) probe_interval: Duration,
     pub(super) probe_target: Query,
+    pub(super) http: HttpOptions,
 }
 
 impl DnsConfig {
@@ -161,6 +182,11 @@ impl DnsConfig {
             Some("0") => false,
             _ => bail!("dns-hijack must be 0 or 1"),
         };
+        let prewarm = match query.get("dns-http-prewarm").map(String::as_str) {
+            None | Some("1") => true,
+            Some("0") => false,
+            _ => bail!("dns-http-prewarm must be 0 or 1"),
+        };
         let timeout = duration(
             "dns-timeout",
             Duration::from_secs(2),
@@ -209,6 +235,22 @@ impl DnsConfig {
                 Duration::from_secs(60),
             )?,
             probe_target: Query::query(probe_name, probe_type),
+            http: HttpOptions {
+                pool_size: number("dns-http-pool-size", 2, 4)?,
+                keepalive: duration(
+                    "dns-http-keepalive",
+                    Duration::from_secs(30),
+                    Duration::from_millis(10),
+                    Duration::from_secs(600),
+                )?,
+                ping_timeout: duration(
+                    "dns-http-ping-timeout",
+                    Duration::from_secs(5),
+                    Duration::from_millis(10),
+                    Duration::from_secs(60),
+                )?,
+                prewarm,
+            },
         }))
     }
 

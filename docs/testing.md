@@ -42,9 +42,11 @@ cargo test --locked hijacks_tcp_udp_ipv4_ipv6_domain_53 -- --test-threads=1
 ```
 
 Encrypted DNS tests use generated local trust roots and DoH/DoT/DoQ upstream
-fixtures, not public DNS services. They cover certificate rejection, connection
-reuse, cache TTL/stale/negative limits, deduplication, fallback deadlines and
-recovery probes, and port-53 interception over TLS/QUIC. On a 2 GiB host, use
+fixtures (including HTTP/2 and HTTP/3), not public DNS services. They cover
+certificate rejection, request/stream error isolation, concurrent multiplexing,
+bounded HTTP/2 pools, passive prewarming, PING ACK expiry, GOAWAY reconnects,
+HTTP/3 fallback and HTTP Age, cache TTL/stale/negative limits, deduplication,
+fallback deadlines, recovery probes, and port-53 interception over TLS/QUIC. On a 2 GiB host, use
 `CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0
 CARGO_PROFILE_TEST_CODEGEN_UNITS=16 TOKIO_WORKER_THREADS=2` and
 `cargo test --all-targets --locked -j1 -- --test-threads=1`; avoid running builds

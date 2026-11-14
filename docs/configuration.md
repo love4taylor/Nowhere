@@ -295,14 +295,37 @@ client DNS (DoH/DoT/DoQ), install firewall rules, or open a public DNS listener.
 | `dns-fallback-delay` | `50ms` | Start the next candidate after this budget, `1ms..=2s`, less than `dns-timeout` |
 | `dns-probe-interval` | `250ms` | Minimum delay after a health test before the next test, `10ms..=60s` |
 | `dns-probe-target` | `.` | DNS health-test name: root uses NS; any other name uses A |
+| `dns-http-pool-size` | `2` | HTTP/2 connections per upstream, `1..=4`; HTTP/3 uses one multiplexed QUIC connection |
+| `dns-http-keepalive` | `30s` | HTTP/2 PING interval and HTTP/3 QUIC keepalive interval, `10ms..=600s` |
+| `dns-http-ping-timeout` | `5s` | HTTP/2 PING ACK deadline, `10ms..=60s`; also contributes to HTTP/3 idle timeout |
+| `dns-http-prewarm` | `1` | Establish HTTP/2 pool / HTTP/3 connection in the background at startup; `0` disables |
 
 Upstreams use `https://HOST[:443]/dns-query` (DoH over HTTP/2),
+`h3://HOST[:443]/dns-query` (DoH over HTTP/3),
 `tls://HOST[:853]` (DoT), or `quic://HOST[:853]` (DoQ, RFC 9250). Certificates
 must validate against the system trust store and match `HOST`. There is no
 insecure mode or implicit plaintext fallback. Encrypted sessions are reused;
 TCP sockets use TCP_NODELAY. Upstream requests connect directly from the resolver
 host, obey its `dial`/`dial4`/`dial6` and address preference, and do not traverse
 the fixed SOCKS5/Egress outlet.
+
+HTTP/2 requests share a bounded, least-busy connection pool. Startup prewarming
+only performs transport handshakes: it does not issue DNS queries, change health,
+or populate the cache. Warmup failures do not block startup; queries reconnect
+on demand. PING ACK timeouts expire the affected HTTP/2 connection. HTTP status
+errors, malformed response bodies and stream resets fail the individual request
+without evicting its otherwise usable connection or cancelling parallel streams.
+GOAWAY, connection protocol errors and I/O failures evict only that pool slot.
+A failed reused connection may reconnect once within the original query deadline;
+request-level errors are not retried on the same upstream.
+
+HTTP/3 uses POST with the same DNS message validation and HTTP Age handling as
+HTTP/2. It uses QUIC keepalive (not HTTP/2 PING) and an idle timeout of
+`dns-http-keepalive + dns-http-ping-timeout + 1s`. One multiplexed QUIC
+connection is retained per upstream, following RFC 9114 section 3.3. Select
+HTTP/3 explicitly using `h3://`; there is no automatic Alt-Svc upgrade or
+protocol downgrade. Configure an `https://` entry in `dns-fallback` if UDP/443
+can be blocked. These HTTP options do not change DoT or DoQ behavior.
 
 An upstream URL may contain one `bootstrap=IP` parameter. It fixes the remote
 IP while preserving the URL host for TLS identity verification. Otherwise,
@@ -314,6 +337,7 @@ Percent-encode nested URL query delimiters inside a role URL:
 ```sh
 nowhere 'portal://KEY@*:2000?prefer=ipv4&tcp-concurrent=1&dns=https://1.1.1.1/dns-query&dns-fallback=tls://1.0.0.1&dns-fallback-delay=50ms&dns-probe-interval=250ms'
 nowhere 'portal://KEY@*:2000?dns=quic://dns.adguard-dns.com%3Fbootstrap%3D94.140.14.14&dns-fallback=https://1.1.1.1/dns-query'
+nowhere 'portal://KEY@*:2000?dns=h3://1.1.1.1/dns-query&dns-fallback=https://1.1.1.1/dns-query&dns-http-pool-size=2&dns-http-keepalive=30s'
 ```
 
 Configured, healthy primary upstreams precede fallbacks. A transport failure,

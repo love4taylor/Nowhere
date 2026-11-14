@@ -28,7 +28,7 @@ One Rust binary brings the pieces together: **Vector** connects applications,
 | Encrypted transport | TLS or QUIC for TCP and UDP traffic |
 | Exit placement | Direct access, a SOCKS5 upstream or a remote Egress |
 | Standard ingress | Connect applications through SOCKS5 |
-| Optional built-in DNS | DoH/DoT/DoQ, optimistic cache, fast fallback and TCP/UDP port-53 interception ([configuration](docs/configuration.md#built-in-dns)) |
+| Optional built-in DNS | DoH (HTTP/2 or HTTP/3)/DoT/DoQ, optimistic cache, fast fallback and TCP/UDP port-53 interception ([configuration](docs/configuration.md#built-in-dns)) |
 | Optional Morph | Shared-key masking of the transport wire image |
 | Operational visibility | Local status and structured telemetry |
 

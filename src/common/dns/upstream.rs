@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,8 +22,9 @@ use tokio::time::Instant;
 
 use crate::common::{AddressFamily, DialPolicy, filter_addrs_for_family};
 
-use super::config::{Transport, UpstreamConfig};
+use super::config::{HttpOptions, Transport, UpstreamConfig};
 use super::health::{HealthState, ProbeOutcome};
+use super::http3::Http3Session;
 use super::https::HttpsSession;
 
 #[derive(Default)]
@@ -40,12 +41,41 @@ type Exchange = DnsExchange<TokioRuntimeProvider>;
 enum EncryptedSession {
     Dns(Exchange),
     Https(HttpsSession),
+    Http3(Http3Session),
+}
+
+impl EncryptedSession {
+    fn is_usable(&self) -> bool {
+        match self {
+            Self::Dns(_) => true,
+            Self::Https(session) => session.is_usable(),
+            Self::Http3(session) => session.is_usable(),
+        }
+    }
+
+    fn invalidated_by(&self, error: &anyhow::Error) -> bool {
+        matches!(self, Self::Dns(_)) || !self.is_usable() || super::https::connection_error(error)
+    }
 }
 
 #[derive(Default)]
 struct Session {
     generation: u64,
     exchange: Option<EncryptedSession>,
+}
+
+#[derive(Default)]
+struct Slot {
+    session: Mutex<Session>,
+    active: AtomicUsize,
+}
+
+struct Busy<'a>(&'a AtomicUsize);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 pub(super) struct Upstream {
@@ -55,7 +85,9 @@ pub(super) struct Upstream {
     policy: DialPolicy,
     tls: Arc<rustls::ClientConfig>,
     timeout: Duration,
-    session: Mutex<Session>,
+    slots: Vec<Slot>,
+    next_slot: AtomicUsize,
+    http: HttpOptions,
     // Keep the provider alive: it owns the encrypted sessions' background tasks.
     provider: TokioRuntimeProvider,
     counters: Counters,
@@ -71,14 +103,24 @@ impl Upstream {
         policy: DialPolicy,
         tls: Arc<rustls::ClientConfig>,
         timeout: Duration,
+        http: HttpOptions,
     ) -> Self {
+        // QUIC streams avoid TCP head-of-line blocking. RFC 9114 section 3.3
+        // recommends a single H3 connection per peer; the TCP pool is for H2.
+        let pool_size = if config.transport == Transport::Https {
+            http.pool_size
+        } else {
+            1
+        };
         Self {
             index,
             config,
             policy,
             tls,
             timeout,
-            session: Mutex::new(Session::default()),
+            slots: (0..pool_size).map(|_| Slot::default()).collect(),
+            next_slot: AtomicUsize::new(0),
+            http,
             provider: TokioRuntimeProvider::new(),
             unhealthy: AtomicBool::new(false),
             counters: Counters::default(),
@@ -86,6 +128,32 @@ impl Upstream {
             probe_needed: AtomicBool::new(false),
             probe_wakeup: Notify::new(),
         }
+    }
+
+    pub(super) async fn prewarm(&self) {
+        if !self.http.prewarm
+            || !matches!(self.config.transport, Transport::Https | Transport::Http3)
+        {
+            return;
+        }
+        // At most four concurrent handshakes per H2 upstream, one for H3.
+        let mut futures = futures_util::stream::FuturesUnordered::new();
+        for slot in &self.slots {
+            futures.push(async {
+                slot.active.fetch_add(1, Ordering::Relaxed);
+                let _busy = Busy(&slot.active);
+                let _ = tokio::time::timeout(self.timeout, async {
+                    let mut session = slot.session.lock().await;
+                    if session.exchange.as_ref().is_none_or(|s| !s.is_usable()) {
+                        session.exchange = Some(self.connect().await?);
+                        session.generation = session.generation.wrapping_add(1);
+                    }
+                    anyhow::Ok(())
+                })
+                .await;
+            });
+        }
+        while futures.next().await.is_some() {}
     }
 
     pub(super) fn needs_probe(&self) -> bool {
@@ -204,6 +272,7 @@ impl Upstream {
     pub(super) fn snapshot(&self, fallback: bool) -> crate::telemetry::DnsUpstreamSnapshot {
         let scheme = match self.config.transport {
             Transport::Https => "https",
+            Transport::Http3 => "h3",
             Transport::Tls => "tls",
             Transport::Quic => "quic",
         };
@@ -225,10 +294,20 @@ impl Upstream {
     }
 
     async fn query_inner(&self, request: &Message) -> Result<Message> {
+        let start = self.next_slot.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        let slot = (0..self.slots.len())
+            .map(|offset| &self.slots[(start + offset) % self.slots.len()])
+            .min_by_key(|slot| slot.active.load(Ordering::Relaxed))
+            .unwrap();
+        slot.active.fetch_add(1, Ordering::Relaxed);
+        let _busy = Busy(&slot.active);
         let mut retry = true;
         loop {
             let (exchange, generation, reused) = {
-                let mut session = self.session.lock().await;
+                let mut session = slot.session.lock().await;
+                if session.exchange.as_ref().is_some_and(|s| !s.is_usable()) {
+                    session.exchange = None;
+                }
                 let reused = session.exchange.is_some();
                 if !reused {
                     session.exchange = Some(self.connect().await?);
@@ -241,8 +320,9 @@ impl Upstream {
                 )
             };
             let result = async {
-                match exchange {
+                match &exchange {
                     EncryptedSession::Https(exchange) => exchange.query(request).await,
+                    EncryptedSession::Http3(exchange) => exchange.query(request).await,
                     EncryptedSession::Dns(exchange) => Ok(exchange
                         .send(DnsRequest::new(
                             request.clone(),
@@ -258,7 +338,10 @@ impl Upstream {
             let response = match result {
                 Ok(response) => response,
                 Err(error) => {
-                    let mut session = self.session.lock().await;
+                    if !exchange.invalidated_by(&error) {
+                        return Err(error);
+                    }
+                    let mut session = slot.session.lock().await;
                     if session.generation == generation {
                         session.exchange = None;
                     }
@@ -328,6 +411,17 @@ impl Upstream {
                     address,
                     self.policy.local_ip(address.ip())?,
                     &self.tls,
+                    &self.http,
+                )
+                .await?,
+            )),
+            Transport::Http3 => Ok(EncryptedSession::Http3(
+                Http3Session::connect(
+                    config,
+                    address,
+                    self.policy.local_ip(address.ip())?,
+                    &self.tls,
+                    &self.http,
                 )
                 .await?,
             )),
