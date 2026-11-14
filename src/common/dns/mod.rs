@@ -7,6 +7,7 @@ mod cache;
 mod config;
 mod hijack;
 mod https;
+mod stats;
 mod upstream;
 
 use std::collections::HashMap;
@@ -42,6 +43,7 @@ pub(crate) struct DnsResolver {
     queries: Arc<Semaphore>,
     pub(super) connections: Arc<Semaphore>,
     probes: OnceLock<()>,
+    counters: stats::Counters,
 }
 
 impl fmt::Debug for DnsResolver {
@@ -87,6 +89,7 @@ impl DnsResolver {
             queries: Arc::new(Semaphore::new(128)),
             connections: Arc::new(Semaphore::new(64)),
             probes: OnceLock::new(),
+            counters: stats::Counters::default(),
         }))
     }
 
@@ -100,6 +103,12 @@ impl DnsResolver {
 
     /// Always produces a DNS response to a syntactically valid query, including SERVFAIL.
     pub(crate) async fn answer(self: &Arc<Self>, packet: &[u8], udp: bool) -> Result<Vec<u8>> {
+        let counter = if udp {
+            &self.counters.udp_queries
+        } else {
+            &self.counters.tcp_queries
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         let request = match Message::from_vec(packet) {
             Ok(request) => request,
             Err(_) => {
@@ -172,6 +181,15 @@ impl DnsResolver {
     }
 
     async fn resolve(self: &Arc<Self>, request: &Message) -> Result<Message> {
+        self.counters.queries.fetch_add(1, Ordering::Relaxed);
+        let result = self.resolve_inner(request).await;
+        if result.is_err() {
+            self.counters.failures.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn resolve_inner(self: &Arc<Self>, request: &Message) -> Result<Message> {
         self.start_probes();
         let mut normalized = request.clone();
         normalized.metadata.id = 0;
@@ -194,12 +212,19 @@ impl DnsResolver {
             None
         };
         if let Some(hit) = hit {
+            let counter = if hit.stale {
+                &self.counters.stale_hits
+            } else {
+                &self.counters.cache_hits
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
             if hit.refresh {
-                let _ = self.start_query(key, normalized, cacheable);
+                let _ = self.start_query(key, normalized, cacheable, true);
             }
             return Ok(hit.response);
         }
-        let mut flight = self.start_query(key, normalized, cacheable)?;
+        self.counters.cache_misses.fetch_add(1, Ordering::Relaxed);
+        let mut flight = self.start_query(key, normalized, cacheable, false)?;
         loop {
             if let Some(result) = flight.borrow().clone() {
                 return match result {
@@ -216,9 +241,11 @@ impl DnsResolver {
         key: Vec<u8>,
         request: Message,
         cacheable: bool,
+        refresh: bool,
     ) -> Result<Flight> {
         let mut flights = self.flights.lock().unwrap();
         if let Some(flight) = flights.get(&key) {
+            self.counters.deduplicated.fetch_add(1, Ordering::Relaxed);
             return Ok(flight.clone());
         }
         let permit = self
@@ -228,6 +255,9 @@ impl DnsResolver {
             .context("DNS query concurrency exhausted")?;
         let (sender, receiver) = watch::channel(None);
         flights.insert(key.clone(), receiver.clone());
+        if refresh {
+            self.counters.refreshes.fetch_add(1, Ordering::Relaxed);
+        }
         let resolver = self.clone();
         tokio::spawn(async move {
             let _permit = permit;
@@ -283,7 +313,10 @@ impl DnsResolver {
                         let Some((index, result)) = result else { break; };
                         pending[index] = false;
                         match result {
-                            Ok(response) => return Ok(response),
+                            Ok(response) => {
+                                self.record_winner(index);
+                                return Ok(response);
+                            },
                             Err(error) => last_error = error,
                         }
                         // Transport failures/SERVFAIL trigger fallback immediately.
@@ -312,7 +345,7 @@ impl DnsResolver {
                 // The shared deadline may fire before an individual attempt's timeout.
                 for (index, pending) in pending.iter().enumerate() {
                     if *pending {
-                        self.upstreams[index].mark_unhealthy();
+                        self.upstreams[index].mark_timed_out();
                     }
                 }
                 Err(error).context("DNS total query timeout")
@@ -345,7 +378,7 @@ impl DnsResolver {
                             .fallback_delay
                             .max(interval)
                             .min(resolver.config.timeout);
-                        if tokio::time::timeout(budget, upstream.query(&probe))
+                        if tokio::time::timeout(budget, upstream.probe(&probe))
                             .await
                             .is_err()
                         {

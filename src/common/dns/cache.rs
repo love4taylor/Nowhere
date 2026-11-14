@@ -31,9 +31,14 @@ pub(super) struct Cache {
 pub(super) struct Hit {
     pub(super) response: Message,
     pub(super) refresh: bool,
+    pub(super) stale: bool,
 }
 
 impl Cache {
+    pub(super) fn usage(&self) -> (usize, usize) {
+        (self.entries.len(), self.bytes)
+    }
+
     pub(super) fn get(&mut self, key: &[u8], retry: Duration) -> Option<Hit> {
         let now = Instant::now();
         if self.entries.get(key).is_some_and(|e| now >= e.stale_until) {
@@ -70,7 +75,11 @@ impl Cache {
         if refresh {
             entry.refresh_after = now + retry;
         }
-        Some(Hit { response, refresh })
+        Some(Hit {
+            response,
+            refresh,
+            stale,
+        })
     }
 
     pub(super) fn insert(&mut self, key: Vec<u8>, response: &Message, config: &DnsConfig) {

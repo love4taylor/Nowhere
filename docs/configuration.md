@@ -353,6 +353,12 @@ resolution. Without `dns`, all prior resolution and port-53 forwarding behavior
 is retained. Startup diagnostics show `dns=encrypted` and `dns-hijack`; actual
 upstream URLs are omitted.
 
+`nowhere status` includes DNS counters, cache usage, per-upstream health, current
+preferred upstream and the last upstream that actually supplied an answer. A
+probe restoring the primary changes the preference without changing the last
+winner. Cached replies leave the last winner unchanged. See
+[DNS statistics](telemetry.md#dns-statistics) for counter definitions.
+
 ## Parameter overview
 
 A dash means that the role does not recognize the parameter.

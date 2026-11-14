@@ -65,6 +65,43 @@ pub(crate) struct TelemetrySnapshot {
     pub(crate) udp_download_bytes: u64,
     pub(crate) tcp_active: i64,
     pub(crate) udp_active: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dns: Option<DnsSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DnsSnapshot {
+    pub(crate) hijack: bool,
+    pub(crate) queries: u64,
+    pub(crate) cache_hits: u64,
+    pub(crate) stale_hits: u64,
+    pub(crate) cache_misses: u64,
+    pub(crate) deduplicated: u64,
+    pub(crate) refreshes: u64,
+    pub(crate) failures: u64,
+    pub(crate) fallback_replies: u64,
+    pub(crate) upstream_switches: u64,
+    pub(crate) tcp_queries: u64,
+    pub(crate) udp_queries: u64,
+    pub(crate) cache_entries: usize,
+    pub(crate) cache_bytes: usize,
+    pub(crate) in_flight: usize,
+    pub(crate) preferred_upstream: Option<usize>,
+    pub(crate) last_upstream: Option<usize>,
+    pub(crate) upstreams: Vec<DnsUpstreamSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DnsUpstreamSnapshot {
+    pub(crate) endpoint: String,
+    pub(crate) fallback: bool,
+    pub(crate) healthy: bool,
+    pub(crate) queries: u64,
+    pub(crate) failures: u64,
+    pub(crate) probes: u64,
+    pub(crate) last_latency_us: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

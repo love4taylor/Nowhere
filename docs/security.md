@@ -304,8 +304,10 @@ never logged. IPC metadata exposes validated service endpoints to authorized
 collectors; it includes no configuration summary, client address or transport
 peer identity.
 
-IPC carries instance identity and six statistics. It contains no Flow events,
-error messages or logs.
+IPC carries instance identity, six traffic statistics and optional built-in DNS
+counters/health. DNS upstream scheme, host and port are visible; queried names,
+custom DoH paths, credentials and bootstrap/query details are excluded. IPC
+contains no Flow events, error messages or logs.
 
 Service errors preserve their original cause chains and can contain addresses
 or paths. Error construction excludes passwords, Shared Keys and complete

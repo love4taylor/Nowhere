@@ -119,7 +119,7 @@ When wire bytes change, update the specification, vectors and codec tests togeth
 | Lifetime | Half-close, handshake/authentication/registration cancellation, setup deadlines/cancellation, idle timeout, UDP control FIN/reset/stop, late DATAGRAMs and bounded drain |
 | Egress | Mixed-carrier FIFO, ACCEPTED/BUSY, offline waiting, Hydra growth and decay, TTL, claim races, reconnect and cleanup |
 | Configuration | Role-specific endpoint carrier counts and families, first duplicates, ignored unknowns, percent decoding, conflicts, effective configuration and explicit bind failure |
-| Telemetry | Known-byte counters, ownership counts, passive snapshots, ignored input, EOF and write timeout cleanup |
+| Telemetry | Known-byte counters, DNS cache/fallback/recovery counters, passive snapshots, endpoint privacy, ownership counts, ignored input, EOF and write timeout cleanup |
 | IPC | Frame/client limits, permissions, identity/incarnation checks, PID reuse and namespace isolation |
 
 TLS standby tests use short internal runtime durations through the production

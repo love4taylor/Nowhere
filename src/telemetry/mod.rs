@@ -10,7 +10,9 @@ mod process;
 mod wire;
 
 pub(crate) use ipc::{DiscoveredInstance, TelemetryClient, TelemetryServer, discover_instances};
+pub(crate) use privacy::dns_endpoint as display_dns_endpoint;
 pub(crate) use privacy::endpoint as display_endpoint;
 pub(crate) use wire::{
-    Hello, InstanceRole, MAX_FRAME_SIZE, ServerMessage, TELEMETRY_PROTOCOL, TelemetrySnapshot,
+    DnsSnapshot, DnsUpstreamSnapshot, Hello, InstanceRole, MAX_FRAME_SIZE, ServerMessage,
+    TELEMETRY_PROTOCOL, TelemetrySnapshot,
 };
