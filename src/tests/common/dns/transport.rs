@@ -77,7 +77,7 @@ async fn hanging_primary_falls_back_in_milliseconds_skips_failed_primary_and_rec
         failover >= Duration::from_millis(30) && failover < Duration::from_millis(250),
         "{failover:?}"
     );
-    tokio::time::timeout(Duration::from_millis(250), async {
+    tokio::time::timeout(Duration::from_millis(500), async {
         while !resolver.upstreams[0].unhealthy.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }

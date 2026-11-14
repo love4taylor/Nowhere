@@ -58,36 +58,146 @@ async fn client_dns_errors_fall_back_without_poisoning_a_working_health_target()
 }
 
 #[tokio::test]
-async fn configured_target_must_have_a_positive_answer_and_recovery_uses_the_same_target() {
-    for mode in [13, 14] {
+async fn bad_target_answers_do_not_degrade_a_working_upstream_or_recover_a_bad_one() {
+    for mode in [2, 3, 13, 14] {
         let primary = TestServer::new("tls").await;
         primary.mode.store(mode, Ordering::Relaxed);
         let resolver = primary.resolver(&[
             ("dns-probe-target", "probe-target.test"),
             ("dns-probe-interval", "20ms"),
         ]);
-        assert_eq!(ask(&resolver, "normal.test.", 1).await.answers.len(), 1);
-        assert!(resolver.snapshot().upstreams[0].healthy);
-        resolver.upstreams[0].request_probe();
-        tokio::time::timeout(Duration::from_millis(250), async {
-            while resolver.snapshot().upstreams[0].healthy {
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(resolver.snapshot().preferred_upstream, None);
-        assert_eq!(resolver.snapshot().last_upstream, Some(0));
+        let upstream = &resolver.upstreams[0];
+        let probe = request("probe-target.test.", 0);
+        for _ in 0..4 {
+            assert!(
+                upstream
+                    .probe(&probe, Duration::from_millis(200))
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(upstream.snapshot(false).healthy);
+        primary.mode.store(4, Ordering::Relaxed);
+        for _ in 0..3 {
+            assert!(upstream.query(&request("bad.test.", 1)).await.is_err());
+        }
+        assert!(!upstream.snapshot(false).healthy);
+        primary.mode.store(mode, Ordering::Relaxed);
+        assert!(
+            upstream
+                .probe(&probe, Duration::from_millis(200))
+                .await
+                .is_err()
+        );
+        assert!(!upstream.snapshot(false).healthy);
         primary.mode.store(0, Ordering::Relaxed);
-        tokio::time::timeout(Duration::from_millis(250), async {
-            while !resolver.snapshot().upstreams[0].healthy {
-                tokio::time::sleep(Duration::from_millis(2)).await;
+        upstream
+            .probe(&probe, Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert!(upstream.snapshot(false).healthy);
+    }
+}
+
+#[tokio::test]
+async fn real_success_recovers_without_waiting_for_a_probe_or_a_working_target() {
+    for transport in ["tls", "https", "quic"] {
+        let primary = TestServer::new(transport).await;
+        let resolver = primary.resolver(&[("dns-probe-target", "probe-target.test")]);
+        let upstream = &resolver.upstreams[0];
+        primary.mode.store(4, Ordering::Relaxed);
+        for n in 0..3 {
+            assert!(upstream.query(&request("broken.test.", n)).await.is_err());
+            assert_eq!(upstream.snapshot(false).healthy, n < 2);
+        }
+        for mode in [0, 3, 14] {
+            primary.mode.store(mode, Ordering::Relaxed);
+            let name = if mode == 14 {
+                "probe-target.test."
+            } else {
+                "business.test."
+            };
+            assert!(upstream.query(&request(name, 99)).await.is_ok());
+            assert!(upstream.snapshot(false).healthy);
+            assert_eq!(upstream.snapshot(false).probes, 0);
+            primary.mode.store(4, Ordering::Relaxed);
+            for _ in 0..3 {
+                assert!(upstream.query(&request("broken.test.", 10)).await.is_err());
+            }
+            assert!(!upstream.snapshot(false).healthy);
+        }
+    }
+}
+
+#[tokio::test]
+async fn repeated_dns_error_codes_do_not_count_as_transport_failures() {
+    for transport in ["tls", "https", "quic"] {
+        for mode in 9..=12 {
+            let server = TestServer::new(transport).await;
+            server.mode.store(mode, Ordering::Relaxed);
+            let resolver = server.resolver(&[]);
+            let upstream = &resolver.upstreams[0];
+            for _ in 0..5 {
+                assert!(
+                    upstream
+                        .query(&request("business-error.test.", 1))
+                        .await
+                        .is_err()
+                );
+                assert!(upstream.snapshot(false).healthy, "{transport}: {mode}");
+                assert!(
+                    !upstream.needs_probe(),
+                    "DNS errors are not transport failures"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn in_flight_probe_cannot_override_newer_real_success_or_failures() {
+    let server = TestServer::new("https").await;
+    let resolver = server.resolver(&[]);
+    let upstream = resolver.upstreams[0].clone();
+    upstream.query(&request("warm.test.", 1)).await.unwrap();
+    for stale_success in [false, true] {
+        let count = server.count.load(Ordering::Relaxed);
+        server.delay.store(120, Ordering::Relaxed);
+        let probe_upstream = upstream.clone();
+        let task = tokio::spawn(async move {
+            let budget = if stale_success { 300 } else { 80 };
+            probe_upstream
+                .probe(
+                    &request("probe-target.test.", 0),
+                    Duration::from_millis(budget),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while server.count.load(Ordering::Relaxed) == count {
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
         .unwrap();
-        assert_eq!(resolver.snapshot().preferred_upstream, Some(0));
-        assert_eq!(resolver.snapshot().last_upstream, Some(0));
-        assert_eq!(resolver.snapshot().queries, 1);
+        server.delay.store(0, Ordering::Relaxed);
+        if stale_success {
+            server.mode.store(4, Ordering::Relaxed);
+            for _ in 0..3 {
+                assert!(upstream.query(&request("failed.test.", 2)).await.is_err());
+            }
+            assert!(!upstream.snapshot(false).healthy);
+            server.mode.store(0, Ordering::Relaxed);
+            assert!(task.await.unwrap().is_ok());
+            assert!(!upstream.snapshot(false).healthy);
+        } else {
+            upstream
+                .query(&request("new-success.test.", 2))
+                .await
+                .unwrap();
+            assert!(task.await.unwrap().is_err());
+            assert!(upstream.snapshot(false).healthy);
+            assert!(!upstream.needs_probe());
+        }
     }
 }

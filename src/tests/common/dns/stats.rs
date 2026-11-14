@@ -35,7 +35,7 @@ async fn telemetry_distinguishes_current_health_last_winner_cache_and_recovery_p
     let fallback = TestServer::new("https").await;
     primary.mode.store(4, Ordering::Relaxed);
     let resolver =
-        primary.resolver_with_fallback(Some(&fallback), &[("dns-probe-interval", "60s")]);
+        primary.resolver_with_fallback(Some(&fallback), &[("dns-probe-interval", "20ms")]);
     assert_eq!(
         ask(&resolver, "failover-stats.test.", 1)
             .await
@@ -75,7 +75,10 @@ async fn telemetry_distinguishes_current_health_last_winner_cache_and_recovery_p
     assert_eq!(snapshot.cache_entries, 1);
     assert!(snapshot.cache_bytes > 0);
     primary.mode.store(0, Ordering::Relaxed);
-    resolver.upstreams[0].probe(&request(".", 0)).await.unwrap();
+    resolver.upstreams[0]
+        .probe(&request(".", 0), Duration::from_millis(200))
+        .await
+        .unwrap();
     let recovered = resolver.snapshot();
     assert_eq!(recovered.preferred_upstream, Some(0));
     assert_eq!(
@@ -88,7 +91,7 @@ async fn telemetry_distinguishes_current_health_last_winner_cache_and_recovery_p
         "probes are separate from logical queries"
     );
     assert_eq!(recovered.upstreams[0].queries, 1);
-    assert_eq!(recovered.upstreams[0].probes, 2);
+    assert!(recovered.upstreams[0].probes >= 3);
     assert!(recovered.upstreams[0].last_latency_us.is_none());
     assert_eq!(
         ask(&resolver, "recovered-stats.test.", 3)
@@ -118,7 +121,7 @@ async fn failed_resolution_and_malformed_hijacked_packets_have_distinct_counts()
     let malformed =
         Message::from_vec(&resolver.answer(&[0x12, 0x34], true).await.unwrap()).unwrap();
     assert_eq!(malformed.metadata.response_code, ResponseCode::FormErr);
-    tokio::time::timeout(Duration::from_millis(250), async {
+    tokio::time::timeout(Duration::from_millis(750), async {
         while !resolver.upstreams[0].unhealthy.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }

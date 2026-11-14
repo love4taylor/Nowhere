@@ -6,6 +6,74 @@
 use super::*;
 
 #[test]
+fn three_failures_degrade_and_real_success_restores_immediately() {
+    let mut health = HealthState::default();
+    let start = Instant::now();
+    for n in 0..3 {
+        let now = start + Duration::from_millis(n);
+        health.business_failure(now, now);
+        assert_eq!(health.unhealthy, n == 2);
+    }
+    assert!(health.needs_probe());
+    health.business_success(start + Duration::from_millis(3));
+    assert!(!health.unhealthy);
+    assert!(!health.needs_probe());
+    let now = start + Duration::from_millis(4);
+    health.business_failure(now, now);
+    assert!(!health.unhealthy, "success resets the failure streak");
+}
+
+#[test]
+fn stale_probes_and_old_request_failures_cannot_override_new_business_evidence() {
+    let mut health = HealthState::default();
+    let start = Instant::now();
+    let version = health.probe_version();
+    health.business_success(start + Duration::from_millis(1));
+    for _ in 0..3 {
+        health.probe_result(
+            version,
+            ProbeOutcome::Failure,
+            start + Duration::from_millis(2),
+        );
+        health.business_failure(start, start + Duration::from_millis(2));
+    }
+    assert!(!health.needs_probe());
+    let version = health.probe_version();
+    for n in 3..6 {
+        let now = start + Duration::from_millis(n);
+        health.business_failure(now, now);
+    }
+    assert!(health.unhealthy);
+    health.probe_result(
+        version,
+        ProbeOutcome::Success,
+        start + Duration::from_millis(6),
+    );
+    assert!(
+        health.unhealthy,
+        "old probe success cannot erase newer failures"
+    );
+}
+
+#[test]
+fn target_errors_neither_degrade_healthy_upstreams_nor_recover_bad_ones() {
+    let mut health = HealthState::default();
+    let now = Instant::now();
+    for _ in 0..100 {
+        health.probe_result(health.probe_version(), ProbeOutcome::TargetError, now);
+    }
+    assert!(!health.needs_probe());
+    for _ in 0..3 {
+        health.probe_result(health.probe_version(), ProbeOutcome::Failure, now);
+    }
+    assert!(health.unhealthy);
+    health.probe_result(health.probe_version(), ProbeOutcome::TargetError, now);
+    assert!(health.unhealthy);
+    health.probe_result(health.probe_version(), ProbeOutcome::Success, now);
+    assert!(!health.needs_probe());
+}
+
+#[test]
 fn rapid_flaps_remain_silent_and_do_not_accumulate() {
     let mut log = HealthLog::default();
     let start = Instant::now();

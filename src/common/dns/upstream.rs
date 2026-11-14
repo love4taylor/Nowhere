@@ -23,7 +23,7 @@ use tokio::time::Instant;
 use crate::common::{AddressFamily, DialPolicy, filter_addrs_for_family};
 
 use super::config::{Transport, UpstreamConfig};
-use super::health::HealthLog;
+use super::health::{HealthState, ProbeOutcome};
 use super::https::HttpsSession;
 
 #[derive(Default)]
@@ -59,7 +59,7 @@ pub(super) struct Upstream {
     // Keep the provider alive: it owns the encrypted sessions' background tasks.
     provider: TokioRuntimeProvider,
     counters: Counters,
-    health_log: std::sync::Mutex<HealthLog>,
+    health: std::sync::Mutex<HealthState>,
     pub(super) probe_needed: AtomicBool,
     pub(super) probe_wakeup: Notify,
 }
@@ -82,36 +82,33 @@ impl Upstream {
             provider: TokioRuntimeProvider::new(),
             unhealthy: AtomicBool::new(false),
             counters: Counters::default(),
-            health_log: std::sync::Mutex::new(HealthLog::default()),
+            health: std::sync::Mutex::new(HealthState::default()),
             probe_needed: AtomicBool::new(false),
             probe_wakeup: Notify::new(),
         }
     }
 
-    pub(super) fn mark_unhealthy(&self) {
-        let mut log = self.health_log.lock().unwrap();
-        self.unhealthy.store(true, Ordering::Relaxed);
-        log.degrade(Instant::now());
-    }
-
-    fn mark_healthy(&self) {
-        let mut log = self.health_log.lock().unwrap();
-        self.unhealthy.store(false, Ordering::Relaxed);
-        if let Some(notice) = log.recover(Instant::now()) {
-            notice.log(self.index);
-        }
+    pub(super) fn needs_probe(&self) -> bool {
+        self.health.lock().unwrap().needs_probe()
     }
 
     pub(super) fn report_health(&self) {
-        let mut log = self.health_log.lock().unwrap();
-        if let Some(notice) = log.poll(Instant::now()) {
+        let mut health = self.health.lock().unwrap();
+        if let Some(notice) = health.log.poll(Instant::now()) {
             notice.log(self.index);
         }
     }
 
-    pub(super) fn mark_timed_out(&self) {
+    pub(super) fn mark_timed_out(&self, started: Instant) {
         self.counters.failures.fetch_add(1, Ordering::Relaxed);
+        self.business_failure(started);
         self.request_probe();
+    }
+
+    fn business_failure(&self, started: Instant) {
+        let mut health = self.health.lock().unwrap();
+        health.business_failure(started, Instant::now());
+        self.unhealthy.store(health.unhealthy, Ordering::Relaxed);
     }
 
     pub(super) fn request_probe(&self) {
@@ -122,55 +119,84 @@ impl Upstream {
     }
 
     pub(super) async fn query(&self, request: &Message) -> Result<Message> {
-        self.execute(request, false).await
+        self.execute(request, None, self.timeout).await
     }
 
-    pub(super) async fn probe(&self, request: &Message) -> Result<Message> {
-        self.execute(request, true).await
+    pub(super) async fn probe(&self, request: &Message, budget: Duration) -> Result<Message> {
+        let version = self.health.lock().unwrap().probe_version();
+        self.execute(request, Some(version), budget.min(self.timeout))
+            .await
     }
 
-    async fn execute(&self, request: &Message, probe: bool) -> Result<Message> {
+    async fn execute(
+        &self,
+        request: &Message,
+        probe: Option<u64>,
+        budget: Duration,
+    ) -> Result<Message> {
         let started = Instant::now();
-        let counter = if probe {
+        let counter = if probe.is_some() {
             &self.counters.probes
         } else {
             &self.counters.queries
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        let mut result = tokio::time::timeout(self.timeout, self.query_inner(request))
+        let mut result = tokio::time::timeout(budget, self.query_inner(request))
             .await
             .context("DNS upstream timeout")
             .and_then(|result| result);
-        if probe
-            && result.as_ref().is_ok_and(|response| {
-                response.metadata.response_code != ResponseCode::NoError
-                    || !response
-                        .answers
-                        .iter()
-                        .any(|record| record.data.record_type() == request.queries[0].query_type())
-            })
-        {
-            result = Err(anyhow!("DNS health target returned no requested records"));
-        }
-        if result.is_err() {
-            if !probe {
+        if let Some(version) = probe {
+            let outcome = match &result {
+                Err(_) => ProbeOutcome::Failure,
+                Ok(response)
+                    if response.metadata.response_code == ResponseCode::NoError
+                        && response.answers.iter().any(|record| {
+                            record.data.record_type() == request.queries[0].query_type()
+                        }) =>
+                {
+                    ProbeOutcome::Success
+                }
+                Ok(_) => ProbeOutcome::TargetError,
+            };
+            let mut health = self.health.lock().unwrap();
+            let notice = health.probe_result(version, outcome, Instant::now());
+            self.unhealthy.store(health.unhealthy, Ordering::Relaxed);
+            if let Some(notice) = notice {
+                notice.log(self.index);
+            }
+            if matches!(outcome, ProbeOutcome::TargetError) {
+                result = Err(anyhow!("DNS health target returned no requested records"));
+            }
+        } else {
+            if result.is_err() {
+                self.business_failure(started);
+            } else if let Ok(response) = &result {
+                if matches!(
+                    response.metadata.response_code,
+                    ResponseCode::NoError | ResponseCode::NXDomain
+                ) {
+                    let mut health = self.health.lock().unwrap();
+                    let notice = health.business_success(Instant::now());
+                    self.unhealthy.store(health.unhealthy, Ordering::Relaxed);
+                    if let Some(notice) = notice {
+                        notice.log(self.index);
+                    }
+                } else {
+                    result = Err(anyhow!(
+                        "DNS upstream rejected query: {:?}",
+                        response.metadata.response_code
+                    ));
+                }
+            }
+            if result.is_err() {
                 self.counters.failures.fetch_add(1, Ordering::Relaxed);
-            }
-            if probe {
-                self.mark_unhealthy();
-            } else {
-                // Client errors, transport failures and slow answers trigger a separate
-                // health test; only that test may change global routing health.
                 self.request_probe();
+            } else {
+                self.counters.last_latency_us.store(
+                    (started.elapsed().as_micros().min(u64::MAX as u128) as u64).saturating_add(1),
+                    Ordering::Relaxed,
+                );
             }
-        } else if probe {
-            self.mark_healthy();
-        }
-        if !probe && result.is_ok() {
-            self.counters.last_latency_us.store(
-                (started.elapsed().as_micros().min(u64::MAX as u128) as u64).saturating_add(1),
-                Ordering::Relaxed,
-            );
         }
         result
     }
@@ -251,15 +277,6 @@ impl Upstream {
                 || response.queries != request.queries
             {
                 bail!("DNS upstream returned an unrelated response");
-            }
-            if !matches!(
-                response.metadata.response_code,
-                ResponseCode::NoError | ResponseCode::NXDomain
-            ) {
-                bail!(
-                    "DNS upstream rejected query: {:?}",
-                    response.metadata.response_code
-                );
             }
             if response.metadata.truncation {
                 bail!("encrypted DNS upstream returned a truncated response");
