@@ -240,8 +240,11 @@ Each upstream reports `endpoint` (scheme, host and port only), `fallback`,
 include attempts cancelled after another upstream wins; cancellations are not
 failures. Failed attempts and attempts unfinished at the total query deadline
 count as failures. Probes have a separate count and never replace the last
-winner or last successful non-probe query latency. `healthy` means not currently
-marked degraded; a newly configured upstream has not necessarily been contacted.
+winner or last successful non-probe query latency. `healthy` reflects the last
+health-test decision: only the configured `dns-probe-target` can mark an upstream
+degraded or recovered. Ordinary query errors/latency only request a health test.
+A newly configured upstream has not necessarily been contacted. Health logs are
+debounced independently; status does not wait for the one-second log threshold.
 
 Cache hits do not change the winning upstream. A recovery probe can restore
 the preferred upstream before another real query uses it. Therefore current

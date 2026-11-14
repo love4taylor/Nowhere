@@ -5,6 +5,7 @@
 
 mod caching;
 mod configuration;
+mod probing;
 mod stats;
 mod transport;
 
@@ -70,7 +71,18 @@ impl Answers {
         let query = request.queries.first().unwrap();
         let name = query.name().clone();
         let ttl = self.ttl.load(Ordering::Relaxed);
-        if mode == 2 {
+        if (9..=12).contains(&mode) && name.to_ascii().starts_with("business-error.") {
+            response.metadata.response_code = match mode {
+                9 => ResponseCode::Refused,
+                10 => ResponseCode::FormErr,
+                11 => ResponseCode::NotImp,
+                _ => ResponseCode::ServFail,
+            };
+        } else if mode == 13 && name.to_ascii().starts_with("probe-target.") {
+            response.metadata.response_code = ResponseCode::NXDomain;
+        } else if mode == 14 && name.to_ascii().starts_with("probe-target.") {
+            // NOERROR without the requested records is not a successful target test.
+        } else if mode == 2 {
             response.metadata.response_code = ResponseCode::ServFail;
         } else if mode == 3 {
             response.metadata.response_code = ResponseCode::NXDomain;
