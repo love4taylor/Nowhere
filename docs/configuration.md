@@ -273,7 +273,7 @@ diagnostic views. They show the effective `morph` and include `grade` and
 
 ## Built-in DNS
 
-Portal and Egress can run an embedded, encrypted forwarding resolver. It is
+Portal and Egress can run an embedded forwarding resolver. It is
 disabled unless `dns` is configured. Once enabled, `dns-hijack=1` is the default:
 **every authenticated TCP or UDP Flow targeting port 53 is answered by this
 resolver**, regardless of the target IPv4 address, IPv6 address or domain name.
@@ -288,7 +288,7 @@ client DNS (DoH/DoT/DoQ), install firewall rules, or open a public DNS listener.
 
 | Parameter | Default | Meaning / bounds |
 |---|---|---|
-| `dns` | Disabled | Comma-separated primary encrypted upstream URLs; required with any DNS option |
+| `dns` | Disabled | Comma-separated primary DNS upstream URLs; required with any DNS option |
 | `dns-fallback` | Absent | Comma-separated fallback URLs; at most 8 upstreams total |
 | `dns-hijack` | `1` | `1`: intercept TCP/UDP target port 53; `0`: retain normal forwarding |
 | `dns-cache-size` | `4096` | Maximum cached entries, `1..=65536` |
@@ -305,12 +305,27 @@ client DNS (DoH/DoT/DoQ), install firewall rules, or open a public DNS listener.
 
 Upstreams use `https://HOST[:443]/dns-query` (DoH over HTTP/2),
 `h3://HOST[:443]/dns-query` (DoH over HTTP/3),
-`tls://HOST[:853]` (DoT), or `quic://HOST[:853]` (DoQ, RFC 9250). Certificates
-must validate against the system trust store and match `HOST`. There is no
-insecure mode or implicit plaintext fallback. Encrypted sessions are reused;
-TCP sockets use TCP_NODELAY. Upstream requests connect directly from the resolver
-host, obey its `dial`/`dial4`/`dial6` and address preference, and do not traverse
+`tls://HOST[:853]` (DoT), `quic://HOST[:853]` (DoQ, RFC 9250),
+`udp://HOST[:53]` or `tcp://HOST[:53]` (traditional plaintext DNS).
+Encrypted transports validate certificates against the system trust store and
+match `HOST`. There is no insecure mode or implicit downgrade to plaintext.
+Plaintext is used only for explicitly configured `udp://` or `tcp://` entries;
+encrypted and plaintext entries may be mixed in primary/fallback lists.
+Encrypted and TCP sessions are reused; TCP sockets use TCP_NODELAY. Upstream
+requests connect directly from the resolver host, obey its `dial`/`dial4`/`dial6` and address preference, and do not traverse
 the fixed SOCKS5/Egress outlet.
+
+Traditional TCP DNS multiplexes up to 128 in-flight questions on one connection,
+matches replies by transaction ID, and reconnects once if a reused connection
+fails within the original deadline. UDP uses a fresh randomized transaction ID
+and source port per request, verifies the reply source and question, and ignores
+mismatched replies. A UDP response with TC set is retried over TCP at the same
+upstream IP and port, reusing that TCP connection for later truncated replies.
+UDP, TCP setup and the full reply share one `dns-timeout` budget. A TCP retry
+failure continues the normal fallback race. Upstream UDP size is bounded by the
+query's advertised EDNS payload size (512 bytes without EDNS); the client's
+ingress transport and requested UDP size are handled separately.
+Plaintext-only resolver configurations do not require system TLS trust roots.
 
 HTTP/2 requests share a bounded, least-busy connection pool. Startup prewarming
 only performs transport handshakes: it does not issue DNS queries, change health,
@@ -341,6 +356,7 @@ Percent-encode nested URL query delimiters inside a role URL:
 nowhere 'portal://KEY@*:2000?prefer=ipv4&tcp-concurrent=1&dns=https://1.1.1.1/dns-query&dns-fallback=tls://1.0.0.1&dns-fallback-delay=50ms&dns-probe-interval=250ms'
 nowhere 'portal://KEY@*:2000?dns=quic://dns.adguard-dns.com%3Fbootstrap%3D94.140.14.14&dns-fallback=https://1.1.1.1/dns-query'
 nowhere 'portal://KEY@*:2000?dns=h3://1.1.1.1/dns-query&dns-fallback=https://1.1.1.1/dns-query&dns-http-pool-size=2&dns-http-keepalive=30s'
+nowhere 'portal://KEY@*:2000?dns=udp://1.1.1.1&dns-fallback=tcp://1.1.1.1&dns-hijack=1'
 ```
 
 Configured, healthy primary upstreams precede fallbacks. A transport failure,
@@ -415,8 +431,8 @@ When enabled, the same resolver also resolves direct domain targets and locally
 resolved SOCKS5 proxy/UDP-relay names. It does not consult `/etc/hosts` for these
 targets. A SOCKS5 target domain is still passed unchanged to the proxy for remote
 resolution. Without `dns`, all prior resolution and port-53 forwarding behavior
-is retained. Startup diagnostics show `dns=encrypted` and `dns-hijack`; actual
-upstream URLs are omitted.
+is retained. Startup diagnostics show `dns=encrypted`, `dns=plaintext` or `dns=mixed`
+and `dns-hijack`; actual upstream URLs are omitted.
 
 `nowhere status` includes DNS counters, cache usage, per-upstream health, current
 preferred upstream and the last upstream that actually supplied an answer. A

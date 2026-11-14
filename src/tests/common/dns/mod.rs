@@ -1,11 +1,12 @@
 // Copyright (C) 2026 NodePassProject <https://github.com/NodePassProject>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Local encrypted upstreams, cache semantics, failover and DNS ingress tests.
+//! Local DNS upstreams, cache semantics, failover and DNS ingress tests.
 
 mod caching;
 mod configuration;
 mod http_transport;
+mod plain;
 mod probing;
 mod stats;
 mod transport;

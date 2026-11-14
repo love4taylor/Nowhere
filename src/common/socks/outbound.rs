@@ -72,7 +72,7 @@ impl OutboundDialer {
                         .await
                     })
                     .await
-                    .context("encrypted DNS TCP dial timeout")?
+                    .context("DNS TCP dial timeout")?
                 }
                 Target::Domain { .. } => {
                     dial_tcp_with_policy(
@@ -120,7 +120,7 @@ impl OutboundDialer {
                         .map(OutboundUdpSocket::Direct)
                     })
                     .await
-                    .context("encrypted DNS UDP dial timeout")?
+                    .context("DNS UDP dial timeout")?
                 }
                 Target::Domain { .. } => {
                     dial_udp_with_policy(&self.dial_policy, &target.to_string(), timeout)

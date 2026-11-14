@@ -1,7 +1,7 @@
 // Copyright (C) 2026 NodePassProject <https://github.com/NodePassProject>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Reusable, certificate-verified DoH/DoT/DoQ sessions and source binding.
+//! Reusable DNS sessions, certificate-verified encrypted transports and source binding.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -10,8 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
-use hickory_net::DnsHandle;
-use hickory_net::proto::op::{DnsRequest, DnsRequestOptions, Message, MessageType, ResponseCode};
+use hickory_net::proto::op::{Message, MessageType, ResponseCode};
 use hickory_net::quic::QuicClientStream;
 use hickory_net::runtime::{RuntimeProvider, Spawn, TokioRuntimeProvider};
 use hickory_net::xfer::{DnsExchange, DnsMultiplexer};
@@ -26,6 +25,7 @@ use super::config::{HttpOptions, Transport, UpstreamConfig};
 use super::health::{HealthState, ProbeOutcome};
 use super::http3::Http3Session;
 use super::https::HttpsSession;
+use super::plain::{UdpSession, connect_tcp, query_exchange};
 
 #[derive(Default)]
 struct Counters {
@@ -38,16 +38,17 @@ struct Counters {
 type Exchange = DnsExchange<TokioRuntimeProvider>;
 
 #[derive(Clone)]
-enum EncryptedSession {
+enum UpstreamSession {
     Dns(Exchange),
     Https(HttpsSession),
     Http3(Http3Session),
+    Udp(Arc<UdpSession>),
 }
 
-impl EncryptedSession {
+impl UpstreamSession {
     fn is_usable(&self) -> bool {
         match self {
-            Self::Dns(_) => true,
+            Self::Dns(_) | Self::Udp(_) => true,
             Self::Https(session) => session.is_usable(),
             Self::Http3(session) => session.is_usable(),
         }
@@ -61,7 +62,7 @@ impl EncryptedSession {
 #[derive(Default)]
 struct Session {
     generation: u64,
-    exchange: Option<EncryptedSession>,
+    exchange: Option<UpstreamSession>,
 }
 
 #[derive(Default)]
@@ -275,6 +276,8 @@ impl Upstream {
             Transport::Http3 => "h3",
             Transport::Tls => "tls",
             Transport::Quic => "quic",
+            Transport::Tcp => "tcp",
+            Transport::Udp => "udp",
         };
         let host = if self.config.host.contains(':') {
             format!("[{}]", self.config.host)
@@ -321,17 +324,10 @@ impl Upstream {
             };
             let result = async {
                 match &exchange {
-                    EncryptedSession::Https(exchange) => exchange.query(request).await,
-                    EncryptedSession::Http3(exchange) => exchange.query(request).await,
-                    EncryptedSession::Dns(exchange) => Ok(exchange
-                        .send(DnsRequest::new(
-                            request.clone(),
-                            DnsRequestOptions::default(),
-                        ))
-                        .next()
-                        .await
-                        .ok_or_else(|| anyhow!("DNS upstream closed"))??
-                        .into_message()),
+                    UpstreamSession::Https(exchange) => exchange.query(request).await,
+                    UpstreamSession::Http3(exchange) => exchange.query(request).await,
+                    UpstreamSession::Udp(exchange) => exchange.query(request).await,
+                    UpstreamSession::Dns(exchange) => query_exchange(exchange, request).await,
                 }
             }
             .await;
@@ -355,20 +351,15 @@ impl Upstream {
                     return Err(error);
                 }
             };
-            if response.metadata.message_type != MessageType::Response
-                || response.metadata.op_code != request.metadata.op_code
-                || response.queries != request.queries
-            {
-                bail!("DNS upstream returned an unrelated response");
-            }
+            validate_response(request, &response)?;
             if response.metadata.truncation {
-                bail!("encrypted DNS upstream returned a truncated response");
+                bail!("DNS upstream returned a truncated response");
             }
             return Ok(response);
         }
     }
 
-    async fn connect(&self) -> Result<EncryptedSession> {
+    async fn connect(&self) -> Result<UpstreamSession> {
         let config = &self.config;
         let addrs = match config
             .bootstrap
@@ -397,7 +388,7 @@ impl Upstream {
         Err(last_error)
     }
 
-    async fn connect_address(&self, address: SocketAddr) -> Result<EncryptedSession> {
+    async fn connect_address(&self, address: SocketAddr) -> Result<UpstreamSession> {
         let bind = self
             .policy
             .local_ip(address.ip())?
@@ -405,7 +396,7 @@ impl Upstream {
         let config = &self.config;
         let name = Arc::<str>::from(config.host.as_str());
         match config.transport {
-            Transport::Https => Ok(EncryptedSession::Https(
+            Transport::Https => Ok(UpstreamSession::Https(
                 HttpsSession::connect(
                     config,
                     address,
@@ -415,7 +406,7 @@ impl Upstream {
                 )
                 .await?,
             )),
-            Transport::Http3 => Ok(EncryptedSession::Http3(
+            Transport::Http3 => Ok(UpstreamSession::Http3(
                 Http3Session::connect(
                     config,
                     address,
@@ -439,7 +430,7 @@ impl Upstream {
                     .with_max_active_requests(128);
                 let (exchange, background) = DnsExchange::from_stream(stream);
                 self.provider.create_handle().spawn_bg(background);
-                Ok(EncryptedSession::Dns(exchange))
+                Ok(UpstreamSession::Dns(exchange))
             }
             Transport::Quic => {
                 let mut builder = QuicClientStream::builder()
@@ -451,20 +442,41 @@ impl Upstream {
                 let stream = builder.build(address, name).await?;
                 let (exchange, background) = DnsExchange::from_stream(stream);
                 self.provider.create_handle().spawn_bg(background);
-                Ok(EncryptedSession::Dns(exchange))
+                Ok(UpstreamSession::Dns(exchange))
             }
+            Transport::Tcp => Ok(UpstreamSession::Dns(
+                connect_tcp(address, bind, self.timeout, self.provider.clone()).await?,
+            )),
+            Transport::Udp => Ok(UpstreamSession::Udp(Arc::new(UdpSession::new(
+                address,
+                bind,
+                self.timeout,
+                self.provider.clone(),
+            )))),
         }
     }
 }
 
-pub(super) fn client_config() -> Result<Arc<rustls::ClientConfig>> {
-    let native = rustls_native_certs::load_native_certs();
-    let mut roots = rustls::RootCertStore::empty();
-    for certificate in native.certs {
-        roots.add(certificate).context("invalid DNS trust root")?;
+pub(super) fn validate_response(request: &Message, response: &Message) -> Result<()> {
+    if response.metadata.message_type != MessageType::Response
+        || response.metadata.op_code != request.metadata.op_code
+        || response.queries != request.queries
+    {
+        bail!("DNS upstream returned an unrelated response");
     }
-    if roots.is_empty() {
-        bail!("no DNS system trust roots available: {:?}", native.errors);
+    Ok(())
+}
+
+pub(super) fn client_config(require_roots: bool) -> Result<Arc<rustls::ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    if require_roots {
+        let native = rustls_native_certs::load_native_certs();
+        for certificate in native.certs {
+            roots.add(certificate).context("invalid DNS trust root")?;
+        }
+        if roots.is_empty() {
+            bail!("no DNS system trust roots available: {:?}", native.errors);
+        }
     }
     Ok(Arc::new(
         rustls::ClientConfig::builder_with_provider(Arc::new(

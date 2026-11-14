@@ -1,12 +1,12 @@
 // Copyright (C) 2026 NodePassProject <https://github.com/NodePassProject>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Encrypted upstream URL validation and resource-budget configuration.
+//! DNS upstream URL validation and resource-budget configuration.
 
 use super::*;
 
 #[test]
-fn validates_encrypted_upstreams_bounds_and_explicit_enablement() {
+fn validates_upstreams_bounds_and_explicit_enablement() {
     let parse = |pairs: &[(&str, &str)]| {
         let mut url = url::Url::parse("portal://key@localhost:2000").unwrap();
         url.query_pairs_mut().extend_pairs(pairs.iter().copied());
@@ -45,8 +45,9 @@ fn validates_encrypted_upstreams_bounds_and_explicit_enablement() {
     assert_eq!(configured.probe_target.query_type(), RecordType::A);
     for bad in [
         "",
-        "udp://1.1.1.1",
-        "tcp://1.1.1.1",
+        "udp://1.1.1.1/path",
+        "tcp://1.1.1.1/path",
+        "udp://1.1.1.1:0",
         "http://dns.test",
         "tls://dns.test/path",
         "https://user:password@dns.test/dns-query",
@@ -114,4 +115,39 @@ async fn port_53_matches_domain_ipv4_ipv6_only_when_enabled() {
         assert!(!resolver.hijacks(&"192.0.2.1:5353".parse().unwrap()));
         assert!(!resolver.hijacks(&"example.test:443".parse().unwrap()));
     }
+}
+
+#[test]
+fn plaintext_urls_defaults_bootstrap_and_effective_modes() {
+    let parse = |upstreams: &str, fallback: Option<&str>| {
+        let mut url = url::Url::parse("portal://key@localhost:2000").unwrap();
+        url.query_pairs_mut().append_pair("dns", upstreams);
+        if let Some(fallback) = fallback {
+            url.query_pairs_mut().append_pair("dns-fallback", fallback);
+        }
+        DnsConfig::from_url(&url).unwrap().unwrap()
+    };
+    let config = parse(
+        "udp://1.1.1.1,tcp://[::1]:5353,udp://dns.example?bootstrap=127.0.0.1",
+        None,
+    );
+    assert_eq!(config.primary[0].transport, config::Transport::Udp);
+    assert_eq!(config.primary[0].port, 53);
+    assert_eq!(config.primary[1].transport, config::Transport::Tcp);
+    assert_eq!(config.primary[1].host, "::1");
+    assert_eq!(config.primary[1].port, 5353);
+    assert_eq!(
+        config.primary[2].bootstrap,
+        Some("127.0.0.1".parse().unwrap())
+    );
+    assert_eq!(config.effective(), "&dns=plaintext&dns-hijack=1");
+    assert_eq!(
+        parse("tcp://1.1.1.1", Some("https://1.1.1.1")).effective(),
+        "&dns=mixed&dns-hijack=1"
+    );
+    assert_eq!(
+        parse("https://1.1.1.1", None).effective(),
+        "&dns=encrypted&dns-hijack=1"
+    );
+    assert!(upstream::client_config(false).is_ok());
 }
