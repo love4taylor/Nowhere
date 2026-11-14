@@ -249,7 +249,7 @@ pub(super) async fn connect_tcp_addr(
     local_ip: Option<IpAddr>,
     target: SocketAddr,
 ) -> Result<TcpStream> {
-    if let Some(ip) = local_ip {
+    let stream = if let Some(ip) = local_ip {
         let socket = if target.is_ipv4() {
             TcpSocket::new_v4()
         } else {
@@ -261,12 +261,16 @@ pub(super) async fn connect_tcp_addr(
         })?;
         socket.connect(target).await.with_context(|| {
             format!("common::util::connect_tcp_addr: failed to dial from local IP: {ip}")
-        })
+        })?
     } else {
         TcpStream::connect(target)
             .await
-            .with_context(|| "common::util::connect_tcp_addr: failed to dial target")
-    }
+            .with_context(|| "common::util::connect_tcp_addr: failed to dial target")?
+    };
+    stream
+        .set_nodelay(true)
+        .context("common::util::connect_tcp_addr: failed to set TCP_NODELAY")?;
+    Ok(stream)
 }
 
 pub(super) async fn connect_udp_addr(
