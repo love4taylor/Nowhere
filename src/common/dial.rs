@@ -22,11 +22,13 @@ pub(crate) enum DialPolicy {
     SingleSource {
         source: Option<IpAddr>,
         preference: AddressPreference,
+        tcp_concurrent: bool,
     },
     DualStack {
         v4: Option<Ipv4Addr>,
         v6: Option<Ipv6Addr>,
         preference: AddressPreference,
+        tcp_concurrent: bool,
     },
 }
 
@@ -35,12 +37,18 @@ impl Default for DialPolicy {
         Self::SingleSource {
             source: None,
             preference: AddressPreference::Default,
+            tcp_concurrent: false,
         }
     }
 }
 
 impl DialPolicy {
     pub(crate) fn from_query(query: &HashMap<String, String>) -> Result<Self> {
+        let tcp_concurrent = match query.get("tcp-concurrent").map(String::as_str) {
+            None | Some("0") => false,
+            Some("1") => true,
+            Some(_) => bail!("tcp-concurrent must be 0 or 1"),
+        };
         let preference = match query.get("prefer").map(String::as_str) {
             None | Some("default") => AddressPreference::Default,
             Some("ipv4") => AddressPreference::Ipv4,
@@ -73,12 +81,18 @@ impl DialPolicy {
                     Some(ip)
                 }
             };
-            Ok(Self::DualStack { v4, v6, preference })
+            Ok(Self::DualStack {
+                v4,
+                v6,
+                preference,
+                tcp_concurrent,
+            })
         } else {
             match dial.map(String::as_str) {
                 None | Some("auto") => Ok(Self::SingleSource {
                     source: None,
                     preference,
+                    tcp_concurrent,
                 }),
                 Some(value) => Ok(Self::SingleSource {
                     source: Some(
@@ -87,6 +101,7 @@ impl DialPolicy {
                             .map_err(|_| anyhow::anyhow!("dial must be auto or an IP literal"))?,
                     ),
                     preference,
+                    tcp_concurrent,
                 }),
             }
         }
@@ -117,6 +132,14 @@ impl DialPolicy {
         match self {
             Self::SingleSource { preference, .. } | Self::DualStack { preference, .. } => {
                 *preference
+            }
+        }
+    }
+
+    pub(crate) fn tcp_concurrent(&self) -> bool {
+        match self {
+            Self::SingleSource { tcp_concurrent, .. } | Self::DualStack { tcp_concurrent, .. } => {
+                *tcp_concurrent
             }
         }
     }

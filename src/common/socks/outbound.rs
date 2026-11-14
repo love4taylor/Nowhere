@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::net::{TcpStream, lookup_host};
 
-use crate::common::network::{connect_tcp_addr, connect_udp_addr, filter_addrs_for_family};
+use crate::common::network::{
+    connect_tcp_addr, connect_udp_addr, filter_addrs_for_family, first_success,
+};
 use crate::common::{AddressFamily, DialPolicy, dial_tcp_with_policy, dial_udp_with_policy};
 use crate::protocol::Target;
 
@@ -93,24 +95,19 @@ impl OutboundDialer {
         target: &SocksAddress,
     ) -> Result<TcpStream> {
         let addrs = resolve_proxy(config, &self.dial_policy).await?;
+        let attempts = addrs.into_iter().map(|addr| async move {
+            let mut stream = connect_tcp_addr(self.dial_policy.local_ip(addr.ip())?, addr).await?;
+            negotiate(&mut stream, config.credentials()).await?;
+            send_command(&mut stream, COMMAND_CONNECT, target).await?;
+            Ok(stream)
+        });
+        if self.dial_policy.tcp_concurrent() {
+            return first_success(attempts).await;
+        }
         let mut last_err = None;
-        for addr in addrs {
-            let mut stream =
-                match connect_tcp_addr(self.dial_policy.local_ip(addr.ip())?, addr).await {
-                    Ok(stream) => stream,
-                    Err(err) => {
-                        last_err = Some(err);
-                        continue;
-                    }
-                };
-            if let Err(err) = negotiate(&mut stream, config.credentials()).await {
-                last_err = Some(err);
-                continue;
-            }
-            match send_command(&mut stream, COMMAND_CONNECT, target).await {
-                Ok(_) => {
-                    return Ok(stream);
-                }
+        for attempt in attempts {
+            match attempt.await {
+                Ok(stream) => return Ok(stream),
                 Err(err) => last_err = Some(err),
             }
         }

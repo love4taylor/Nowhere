@@ -22,6 +22,7 @@ async fn direct_ip_targets_apply_source_policy_and_reject_source_family_conflict
             v4: Some("127.0.0.1".parse().unwrap()),
             v6: Some("::1".parse().unwrap()),
             preference: crate::common::AddressPreference::Default,
+            tcp_concurrent: false,
         };
         let dialer = OutboundDialer::new(policy, None);
         let stream = dialer
@@ -102,6 +103,7 @@ async fn socks_control_and_udp_relay_select_sources_independently() {
         v4: Some("127.0.0.1".parse().unwrap()),
         v6: Some("::1".parse().unwrap()),
         preference: crate::common::AddressPreference::Default,
+        tcp_concurrent: false,
     };
     let config = parse(&format!("portal://secret@localhost:2000?out={proxy}")).unwrap();
     let dialer = OutboundDialer::new(policy, config);
@@ -165,6 +167,7 @@ async fn socks_tcp_selects_source_without_restricting_the_remote_target_family()
             v4: Some("127.0.0.1".parse().unwrap()),
             v6: Some("::1".parse().unwrap()),
             preference: crate::common::AddressPreference::Default,
+            tcp_concurrent: false,
         };
         let config = parse(&format!("portal://secret@localhost:2000?out={proxy}")).unwrap();
         let dialer = OutboundDialer::new(policy, config);

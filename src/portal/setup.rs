@@ -25,7 +25,18 @@ use super::{
 };
 
 const PORTAL_QUERY_PARAMETERS: &[&str] = &[
-    "tls", "crt", "key", "rate", "etar", "dial", "dial4", "dial6", "prefer", "morph", "out",
+    "tls",
+    "crt",
+    "key",
+    "rate",
+    "etar",
+    "dial",
+    "dial4",
+    "dial6",
+    "prefer",
+    "tcp-concurrent",
+    "morph",
+    "out",
 ];
 
 impl Portal {
@@ -50,7 +61,7 @@ impl Portal {
             .transpose()?;
         let out = query.get("out").map(String::as_str).unwrap_or("direct");
         let registry = if out == "egress" {
-            if ["dial", "dial4", "dial6", "prefer"]
+            if ["dial", "dial4", "dial6", "prefer", "tcp-concurrent"]
                 .iter()
                 .any(|key| query.contains_key(*key))
             {
@@ -82,7 +93,7 @@ impl Portal {
             morph_keys.is_some(),
         )?;
         let effective = format!(
-            "portal://{}?out={out_label}&tls={tls_mode}{}{}&morph={}&rate={rate}&etar={etar}",
+            "portal://{}?out={out_label}&tls={tls_mode}{}{}{}&morph={}&rate={rate}&etar={etar}",
             endpoint.canonical(),
             if registry.is_some() {
                 String::new()
@@ -101,6 +112,11 @@ impl Portal {
                 )
             } else {
                 String::new()
+            },
+            if registry.is_none() && dial.tcp_concurrent() {
+                "&tcp-concurrent=1"
+            } else {
+                ""
             },
             u8::from(morph_keys.is_some())
         );
