@@ -12,6 +12,87 @@ use crate::common::Logger;
 const ALERT_AFTER: Duration = Duration::from_secs(1);
 const REPEAT_AFTER: Duration = Duration::from_secs(60);
 pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const FAILURE_THRESHOLD: u8 = 3;
+
+#[derive(Clone, Copy)]
+pub(super) enum ProbeOutcome {
+    Success,
+    Failure,
+    TargetError,
+}
+
+/// Real answers take precedence over auxiliary tests, including tests in flight.
+#[derive(Default)]
+pub(super) struct HealthState {
+    pub(super) log: HealthLog,
+    pub(super) unhealthy: bool,
+    failures: u8,
+    business_version: u64,
+    last_business_success: Option<Instant>,
+}
+
+impl HealthState {
+    pub(super) fn needs_probe(&self) -> bool {
+        self.unhealthy || self.failures != 0
+    }
+
+    pub(super) fn probe_version(&self) -> u64 {
+        self.business_version
+    }
+
+    pub(super) fn business_success(&mut self, now: Instant) -> Option<Notice> {
+        self.business_version = self.business_version.wrapping_add(1);
+        self.last_business_success = Some(now);
+        self.success(now)
+    }
+
+    pub(super) fn business_failure(&mut self, started: Instant, now: Instant) {
+        // A late failure from an older concurrent request cannot undo a real success.
+        if self
+            .last_business_success
+            .is_some_and(|last| last >= started)
+        {
+            return;
+        }
+        self.business_version = self.business_version.wrapping_add(1);
+        self.failure(now);
+    }
+
+    pub(super) fn probe_result(
+        &mut self,
+        version: u64,
+        outcome: ProbeOutcome,
+        now: Instant,
+    ) -> Option<Notice> {
+        if version != self.business_version {
+            return None;
+        }
+        match outcome {
+            ProbeOutcome::Success => return self.success(now),
+            ProbeOutcome::Failure => self.failure(now),
+            ProbeOutcome::TargetError => {
+                // A valid DNS error/negative answer proves reachability, not a broken
+                // upstream. It cannot recover an already degraded upstream either.
+                self.failures = 0;
+            }
+        }
+        None
+    }
+
+    fn failure(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1).min(FAILURE_THRESHOLD);
+        if self.failures >= FAILURE_THRESHOLD {
+            self.unhealthy = true;
+            self.log.degrade(now);
+        }
+    }
+
+    fn success(&mut self, now: Instant) -> Option<Notice> {
+        self.failures = 0;
+        self.unhealthy = false;
+        self.log.recover(now)
+    }
+}
 
 #[derive(Default)]
 pub(super) struct HealthLog {

@@ -240,9 +240,14 @@ Each upstream reports `endpoint` (scheme, host and port only), `fallback`,
 include attempts cancelled after another upstream wins; cancellations are not
 failures. Failed attempts and attempts unfinished at the total query deadline
 count as failures. Probes have a separate count and never replace the last
-winner or last successful non-probe query latency. `healthy` reflects the last
-health-test decision: only the configured `dns-probe-target` can mark an upstream
-degraded or recovered. Ordinary query errors/latency only request a health test.
+winner or last successful non-probe query latency. `healthy` is driven by real
+answers plus auxiliary tests: three consecutive transport/protocol failures
+(including full timeouts and probe transport failures) degrade an upstream;
+a real successful answer or a positive target test immediately restores it.
+Business NXDOMAIN and NOERROR/NODATA are successful answers. Business DNS error
+codes and hedge-delay expirations request probes without counting health
+failures. Valid target-level errors cannot degrade a healthy upstream or recover
+a degraded one. Stale probe conclusions cannot override newer real evidence.
 A newly configured upstream has not necessarily been contacted. Health logs are
 debounced independently; status does not wait for the one-second log threshold.
 

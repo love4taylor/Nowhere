@@ -286,12 +286,12 @@ impl DnsResolver {
     }
 
     async fn exchange(&self, request: Message) -> Result<Message> {
-        let mut pending = vec![false; self.upstreams.len()];
+        let mut pending = vec![None; self.upstreams.len()];
         let work = async {
             let (mut candidates, degraded): (Vec<_>, Vec<_>) = (0..self.upstreams.len())
                 .partition(|index| !self.upstreams[*index].unhealthy.load(Ordering::Relaxed));
             // Working alternatives precede degraded candidates. A degraded candidate
-            // can still answer if alternatives fail; only a target probe restores health.
+            // can still answer if alternatives fail; a real success also restores health.
             candidates.extend(degraded);
             let mut candidates = candidates.into_iter();
             let mut attempts = FuturesUnordered::<Attempt>::new();
@@ -303,7 +303,7 @@ impl DnsResolver {
             };
             let first = candidates.next().context("no DNS upstream")?;
             launch(first, &mut attempts);
-            pending[first] = true;
+            pending[first] = Some(Instant::now());
             let timer = tokio::time::sleep(self.config.fallback_delay);
             tokio::pin!(timer);
             let mut last_error = anyhow!("all DNS upstreams failed");
@@ -312,7 +312,7 @@ impl DnsResolver {
                 tokio::select! {
                     result = attempts.next() => {
                         let Some((index, result)) = result else { break; };
-                        pending[index] = false;
+                        pending[index] = None;
                         match result {
                             Ok(response) => {
                                 self.record_winner(index);
@@ -322,17 +322,17 @@ impl DnsResolver {
                         }
                         // Transport failures/SERVFAIL trigger fallback immediately.
                         if let Some(index) = next.take() {
-                            launch(index, &mut attempts); pending[index] = true;
+                            launch(index, &mut attempts); pending[index] = Some(Instant::now());
                             next = candidates.next();
                             timer.as_mut().reset(Instant::now() + self.config.fallback_delay);
                         }
                     }
                     _ = &mut timer, if next.is_some() => {
                         for (index, pending) in pending.iter().enumerate() {
-                            if *pending { self.upstreams[index].request_probe(); }
+                            if pending.is_some() { self.upstreams[index].request_probe(); }
                         }
                         let index = next.take().unwrap();
-                        launch(index, &mut attempts); pending[index] = true;
+                        launch(index, &mut attempts); pending[index] = Some(Instant::now());
                         next = candidates.next();
                         timer.as_mut().reset(Instant::now() + self.config.fallback_delay);
                     }
@@ -345,8 +345,8 @@ impl DnsResolver {
             Err(error) => {
                 // The shared deadline may fire before an individual attempt's timeout.
                 for (index, pending) in pending.iter().enumerate() {
-                    if *pending {
-                        self.upstreams[index].mark_timed_out();
+                    if let Some(started) = pending {
+                        self.upstreams[index].mark_timed_out(*started);
                     }
                 }
                 Err(error).context("DNS total query timeout")
@@ -377,8 +377,7 @@ impl DnsResolver {
                         let Some(upstream) = weak_upstream.upgrade() else {
                             break;
                         };
-                        if !upstream.unhealthy.load(Ordering::Relaxed)
-                            && !upstream.probe_needed.load(Ordering::Relaxed)
+                        if !upstream.needs_probe() && !upstream.probe_needed.load(Ordering::Relaxed)
                         {
                             tokio::select! {
                                 _ = tokio::time::sleep(interval) => {},
@@ -389,7 +388,7 @@ impl DnsResolver {
                             break;
                         };
                         let requested = upstream.probe_needed.swap(false, Ordering::Relaxed);
-                        if !requested && !upstream.unhealthy.load(Ordering::Relaxed) {
+                        if !requested && !upstream.needs_probe() {
                             continue;
                         }
                         let mut probe = Message::query();
@@ -400,12 +399,7 @@ impl DnsResolver {
                             .fallback_delay
                             .max(interval)
                             .min(resolver.config.timeout);
-                        if tokio::time::timeout(budget, upstream.probe(&probe))
-                            .await
-                            .is_err()
-                        {
-                            upstream.mark_unhealthy();
-                        }
+                        let _ = upstream.probe(&probe, budget).await;
                         // Bound target traffic even when many client queries keep failing.
                         drop(resolver);
                         drop(upstream);

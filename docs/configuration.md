@@ -324,23 +324,40 @@ SERVFAIL, REFUSED or invalid reply starts the next candidate immediately. A slow
 candidate starts the next after `dns-fallback-delay`; the first valid answer wins
 and pending attempts are cancelled. Degraded candidates follow healthy
 alternatives and are retried only if those alternatives also stall or fail.
-Business-query errors (including SERVFAIL, REFUSED, FORMERR and NOTIMP), slow
-queries and total timeouts request a separate health test. They do not directly
-mark the upstream degraded or recovered. Only a failed health test marks it
-degraded, and only a successful test restores its original priority. NXDOMAIN
-and NOERROR/NODATA remain valid answers for ordinary client queries and do not
-trigger fallback solely because of those result codes.
+Health is primarily driven by real upstream attempts. Three consecutive
+transport/protocol failures or full query timeouts mark an upstream degraded;
+one failure does not. Auxiliary transport/protocol failures also count toward
+this threshold. A real successful answer immediately clears the streak and
+restores the upstream's priority, without waiting for a probe. NXDOMAIN and
+NOERROR/NODATA are valid business answers and also restore health. Cache hits
+are not new upstream evidence. Merely exceeding `dns-fallback-delay` launches
+the next candidate and requests a probe, without counting a health failure.
+
+Business DNS errors (including SERVFAIL, REFUSED, FORMERR and NOTIMP) trigger
+fallback and request a probe, but do not count as transport failures. An upstream
+that consistently returns such DNS errors can therefore remain reachable/healthy
+while its individual queries fall back; health is not a guarantee that every
+domain resolves successfully.
 
 Health tests query `dns-probe-target` directly through the upstream, bypassing
 the resolver cache. The default `.` requests NS records; e.g.
 `dns-probe-target=example.com` requests A records. A successful test requires
-NOERROR and an answer of the requested type. NXDOMAIN, NODATA, other errors,
-invalid responses and timeouts all fail the test. Choose a stable name with the
-expected records: a problem with the test name itself also fails this check.
+NOERROR and an answer of the requested type. A successful test restores health.
+A valid DNS response with NXDOMAIN, NODATA or another DNS error is a target-level
+failure: it breaks the transport-failure streak but neither degrades a healthy
+upstream nor recovers a degraded one. Invalid responses and network timeouts
+count toward the three-failure threshold. Choose a stable name with the expected
+records so target-level errors do not prevent recovery tests from succeeding.
+Tests already in flight are ignored if a newer real success or accepted real
+transport failure changes the health evidence. Late failures from requests
+started before the latest real success are ignored for health as well; their
+attempt/error counters still reflect what happened.
 Concurrent suspicions are coalesced into a pending test. Healthy idle upstreams
 are not continuously tested; a suspicion wakes their first test immediately,
-then `dns-probe-interval` limits further tests. Degraded upstreams continue
-testing until recovery. Probe budgets are bounded by
+then `dns-probe-interval` limits further tests. Suspect upstreams with an
+incomplete failure streak and degraded upstreams continue testing until there
+is a conclusive reply. Degraded upstreams keep testing until recovery, including
+after target-level errors. Probe budgets are bounded by
 `min(dns-timeout, max(dns-probe-interval, dns-fallback-delay))`. Millisecond
 settings are scheduling budgets, not a guarantee on network RTT or TLS/QUIC
 handshake completion. The first query initializes probe workers. Health changes
