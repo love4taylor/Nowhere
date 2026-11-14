@@ -25,6 +25,7 @@ pub(crate) enum Outlet {
 }
 
 pub(crate) struct Forwarder {
+    pub(crate) dns: Option<Arc<crate::common::dns::DnsResolver>>,
     pub(crate) outbound: Outlet,
     pub(crate) runtime: crate::portal::config::PortalRuntimeConfig,
     pub(crate) logger: Logger,

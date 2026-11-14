@@ -13,6 +13,7 @@ use crate::transport::{BufferLease, get_udp_buffer};
 use super::protocol::parse_udp_header;
 
 pub(crate) enum OutboundUdpSocket {
+    Dns(crate::common::dns::DnsSocket),
     Direct(UdpSocket),
     Socks(SocksUdpAssociation),
 }
@@ -20,14 +21,19 @@ pub(crate) enum OutboundUdpSocket {
 impl OutboundUdpSocket {
     pub(crate) async fn send(&self, payload: &[u8], packet: &mut Vec<u8>) -> Result<usize> {
         match self {
+            Self::Dns(socket) => socket.send(payload).await,
             Self::Direct(socket) => socket.send(payload).await.map_err(Into::into),
             Self::Socks(association) => association.send(payload, packet).await,
         }
     }
 
     pub(crate) async fn recv(&self) -> Result<Vec<u8>> {
+        if let Self::Dns(socket) = self {
+            return socket.recv().await;
+        }
         loop {
             match self {
+                Self::Dns(_) => unreachable!(),
                 Self::Direct(socket) => socket.readable().await?,
                 Self::Socks(association) => association.readable().await?,
             }
@@ -39,6 +45,7 @@ impl OutboundUdpSocket {
 
     fn try_recv(&self, mut buffer: BufferLease) -> Result<Option<Vec<u8>>> {
         let received = match self {
+            Self::Dns(_) => unreachable!(),
             Self::Direct(socket) => socket.try_recv(&mut buffer).map_err(Into::into),
             Self::Socks(association) => association
                 .socket
@@ -57,6 +64,7 @@ impl OutboundUdpSocket {
             Err(error) => return Err(error),
         };
         let start = match self {
+            Self::Dns(_) => unreachable!(),
             Self::Direct(_) => 0,
             Self::Socks(_) => {
                 let (header_len, fragment) = parse_udp_header(&buffer[..size])?;

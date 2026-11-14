@@ -10,6 +10,41 @@ use crate::common::DialPolicy;
 use super::*;
 
 #[test]
+fn egress_dns_is_optional_validated_and_hijacks_at_the_exit() {
+    for suffix in [
+        "",
+        "?dns=tls://1.1.1.1&dns-hijack=0",
+        "?dns=quic://dns.test",
+    ] {
+        let egress = Egress::new(
+            Url::parse(&format!(
+                "egress://0123456789abcdef0123456789abcdef@localhost:2000{suffix}"
+            ))
+            .unwrap(),
+            Logger,
+        )
+        .unwrap();
+        assert_eq!(egress.forward.dns.is_some(), !suffix.is_empty());
+        if let Some(dns) = &egress.forward.dns {
+            assert_eq!(
+                dns.hijacks(&"192.0.2.53:53".parse().unwrap()),
+                !suffix.contains("dns-hijack=0")
+            );
+        }
+    }
+    assert!(
+        Egress::new(
+            Url::parse(
+                "egress://0123456789abcdef0123456789abcdef@localhost:2000?dns=http://dns.test"
+            )
+            .unwrap(),
+            Logger
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn endpoint_accepts_one_carrier_or_a_compact_quic_port() {
     const KEY: &str = "0123456789abcdef0123456789abcdef";
     for endpoint in ["localhost:2000", "localhost/udp6:2000"] {

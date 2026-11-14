@@ -139,7 +139,7 @@ pub(crate) async fn dial_udp_with_policy(
         .context("common::util::dial_udp_from_local_ip: dial timeout")?
 }
 
-async fn connect_tcp_candidates(
+pub(super) async fn connect_tcp_candidates(
     policy: &DialPolicy,
     addresses: Vec<SocketAddr>,
 ) -> Result<TcpStream> {
@@ -214,7 +214,7 @@ pub(super) async fn first_success<T, F: Future<Output = Result<T>>>(
     .await
 }
 
-async fn connect_udp_candidates(
+pub(super) async fn connect_udp_candidates(
     policy: &DialPolicy,
     addresses: Vec<SocketAddr>,
 ) -> Result<UdpSocket> {

@@ -75,6 +75,28 @@ impl Harness {
         cipher: &'static str,
         configure: impl FnOnce(&mut PortalRuntimeConfig),
     ) -> Self {
+        Self::configured_inner_cipher(out, morph, host, cipher, |inner| {
+            configure(&mut inner.runtime);
+            Arc::get_mut(&mut inner.forward).unwrap().runtime = inner.runtime;
+        }).await
+    }
+
+    async fn configured_inner(
+        out: &str,
+        morph: bool,
+        host: &str,
+        configure: impl FnOnce(&mut PortalInner),
+    ) -> Self {
+        Self::configured_inner_cipher(out, morph, host, "chacha", configure).await
+    }
+
+    async fn configured_inner_cipher(
+        out: &str,
+        morph: bool,
+        host: &str,
+        cipher: &'static str,
+        configure: impl FnOnce(&mut PortalInner),
+    ) -> Self {
         let portal = Portal::new(
             Url::parse(&format!(
                 "portal://{KEY}@{host}:2000?out={out}&morph={}&cipher={cipher}",
@@ -87,8 +109,7 @@ impl Harness {
         let mut inner = portal.inner;
         {
             let inner = Arc::get_mut(&mut inner).unwrap();
-            configure(&mut inner.runtime);
-            Arc::get_mut(&mut inner.forward).unwrap().runtime = inner.runtime;
+            configure(inner);
         }
         let tcp_listener = listener::listen_tcp(format!("{host}:0").parse().unwrap()).unwrap();
         let tcp = tcp_listener.local_addr().unwrap();

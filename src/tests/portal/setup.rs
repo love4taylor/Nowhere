@@ -6,6 +6,39 @@
 use super::*;
 
 #[test]
+fn dns_settings_are_validated_at_startup_and_shared_with_direct_outbound() {
+    for out in ["direct", "egress", "127.0.0.1:1080"] {
+        let portal = Portal::new(Url::parse(&format!(
+            "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?out={out}&dns=https://1.1.1.1/dns-query"
+        )).unwrap(), Logger).unwrap();
+        assert!(portal.inner.forward.dns.is_some());
+        assert!(
+            portal
+                .inner
+                .effective
+                .contains("dns=encrypted&dns-hijack=1")
+        );
+        assert!(!portal.inner.effective.contains("1.1.1.1"));
+    }
+    for query in [
+        "dns=udp://1.1.1.1",
+        "dns-hijack=1",
+        "dns=tls://1.1.1.1&dns-cache-size=0",
+    ] {
+        assert!(
+            Portal::new(
+                Url::parse(&format!(
+                    "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?{query}"
+                ))
+                .unwrap(),
+                Logger
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn startup_url_preserves_effective_values_and_omits_credentials() {
     for (query, expected) in [
         (

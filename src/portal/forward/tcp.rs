@@ -23,6 +23,14 @@ impl Forwarder {
         cancel: CancellationToken,
     ) -> Result<()> {
         let dial = async {
+            if let Some(dns) = self.dns.as_ref().filter(|dns| dns.hijacks(target)) {
+                let (read, write) = tokio::io::split(dns.open_tcp()?);
+                return Ok((
+                    Box::pin(read) as BoxReader,
+                    Box::pin(write) as BoxWriter,
+                    None,
+                ));
+            }
             match &self.outbound {
                 Outlet::Network(dialer) => {
                     let target = dialer
