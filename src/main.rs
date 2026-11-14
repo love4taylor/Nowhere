@@ -12,6 +12,9 @@ use nowhere::{
 };
 use url::Url;
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
