@@ -33,7 +33,7 @@ pub(crate) fn dns_endpoint(value: &str) -> String {
             return None;
         }
         let url = url::Url::parse(value).ok()?;
-        if !matches!(url.scheme(), "https" | "tls" | "quic")
+        if !matches!(url.scheme(), "https" | "h3" | "tls" | "quic")
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
@@ -45,7 +45,11 @@ pub(crate) fn dns_endpoint(value: &str) -> String {
         let host = url.host_str()?;
         let port = url
             .port()
-            .unwrap_or(if url.scheme() == "https" { 443 } else { 853 });
+            .unwrap_or(if matches!(url.scheme(), "https" | "h3") {
+                443
+            } else {
+                853
+            });
         if port == 0 || endpoint(&format!("{host}:{port}")) == "<redacted>" {
             return None;
         }

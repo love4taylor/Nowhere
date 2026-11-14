@@ -7,6 +7,7 @@ mod cache;
 mod config;
 mod health;
 mod hijack;
+mod http3;
 mod https;
 mod stats;
 mod upstream;
@@ -58,7 +59,18 @@ impl fmt::Debug for DnsResolver {
 
 impl DnsResolver {
     pub(crate) fn new(config: DnsConfig, policy: DialPolicy) -> Result<Arc<Self>> {
-        Self::with_tls(config, policy, upstream::client_config()?)
+        let resolver = Self::with_tls(config, policy, upstream::client_config()?)?;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            for upstream in &resolver.upstreams {
+                let upstream = Arc::downgrade(upstream);
+                runtime.spawn(async move {
+                    if let Some(upstream) = upstream.upgrade() {
+                        upstream.prewarm().await;
+                    }
+                });
+            }
+        }
+        Ok(resolver)
     }
 
     fn with_tls(
@@ -79,6 +91,7 @@ impl DnsResolver {
                     policy.clone(),
                     tls.clone(),
                     config.timeout,
+                    config.http.clone(),
                 ))
             })
             .collect();

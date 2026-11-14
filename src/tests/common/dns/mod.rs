@@ -5,6 +5,7 @@
 
 mod caching;
 mod configuration;
+mod http_transport;
 mod probing;
 mod stats;
 mod transport;
@@ -132,6 +133,7 @@ impl TestServer {
             .unwrap();
         server_tls.alpn_protocols = vec![match transport {
             "https" => b"h2".to_vec(),
+            "h3" => b"h3".to_vec(),
             "tls" => b"dot".to_vec(),
             _ => b"doq".to_vec(),
         }];
@@ -151,7 +153,7 @@ impl TestServer {
             delay: Arc::new(AtomicU64::new(0)),
         };
         let connections = Arc::new(AtomicUsize::new(0));
-        let (address, task) = if transport == "quic" {
+        let (address, task) = if matches!(transport, "quic" | "h3") {
             let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(server_tls).unwrap();
             let endpoint = quinn::Endpoint::server(
                 quinn::ServerConfig::with_crypto(Arc::new(crypto)),
@@ -161,6 +163,7 @@ impl TestServer {
             let address = endpoint.local_addr().unwrap();
             let answers = answers.clone();
             let connections = connections.clone();
+            let http3 = transport == "h3";
             let task = tokio::spawn(async move {
                 let mut tasks = JoinSet::new();
                 while let Some(incoming) = endpoint.accept().await {
@@ -172,6 +175,54 @@ impl TestServer {
                         };
                         connections.fetch_add(1, Ordering::Relaxed);
                         let mut queries = JoinSet::new();
+                        if http3 {
+                            let mut connection =
+                                h3::server::Connection::new(h3_quinn::Connection::new(connection))
+                                    .await
+                                    .unwrap();
+                            while let Ok(Some(request)) = connection.accept().await {
+                                let answers = answers.clone();
+                                queries.spawn(async move {
+                                    use bytes::Buf;
+                                    let (request, mut stream) =
+                                        request.resolve_request().await.unwrap();
+                                    assert_eq!(request.uri().scheme_str(), Some("https"));
+                                    assert_eq!(request.uri().path(), "/dns-query");
+                                    assert_eq!(request.uri().port_u16(), Some(address.port()));
+                                    assert_eq!(request.method(), http::Method::POST);
+                                    assert_eq!(
+                                        request.headers()["content-type"],
+                                        "application/dns-message"
+                                    );
+                                    let mut wire = Vec::new();
+                                    while let Ok(Some(mut chunk)) = stream.recv_data().await {
+                                        let remaining = chunk.remaining();
+                                        wire.extend_from_slice(&chunk.copy_to_bytes(remaining));
+                                    }
+                                    assert_eq!(&wire[..2], &[0, 0]);
+                                    if let Some(response) = answers.answer(&wire).await {
+                                        let mode = answers.mode.load(Ordering::Relaxed);
+                                        if matches!(mode, 16 | 17) && bad_query(&wire) {
+                                            stream
+                                                .stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+                                            return;
+                                        }
+                                        let (headers, response) =
+                                            http_response(mode, &wire, response);
+                                        if stream.send_response(headers).await.is_ok() {
+                                            let _ = stream
+                                                .send_data(bytes::Bytes::from(response))
+                                                .await;
+                                            let _ = stream.finish().await;
+                                        }
+                                    } else {
+                                        std::future::pending::<()>().await;
+                                    }
+                                });
+                                while queries.try_join_next().is_some() {}
+                            }
+                            return;
+                        }
                         while let Ok((mut send, mut recv)) = connection.accept_bi().await {
                             let answers = answers.clone();
                             queries.spawn(async move {
@@ -217,13 +268,32 @@ impl TestServer {
                         let Ok(mut stream) = acceptor.accept(stream).await else {
                             return;
                         };
-                        connections.fetch_add(1, Ordering::Relaxed);
+                        let connection_index = connections.fetch_add(1, Ordering::Relaxed) + 1;
                         if https {
                             let Ok(mut connection) = h2::server::handshake(stream).await else {
                                 return;
                             };
                             let mut queries = JoinSet::new();
-                            while let Some(Ok((request, mut respond))) = connection.accept().await {
+                            loop {
+                                // Leave TCP open but stop reading/ACKing PINGs for the
+                                // keepalive timeout test; normal mode drives H2 while idle.
+                                let mode = answers.mode.load(Ordering::Relaxed);
+                                if mode == 15 || (mode == 23 && connection_index == 1) {
+                                    tokio::time::sleep(Duration::from_millis(2)).await;
+                                    continue;
+                                }
+                                if answers.mode.load(Ordering::Relaxed) == 22 {
+                                    connection.abrupt_shutdown(h2::Reason::NO_ERROR);
+                                    let _ = connection.accept().await;
+                                    break;
+                                }
+                                let incoming = tokio::select! {
+                                    incoming = connection.accept() => incoming,
+                                    _ = tokio::time::sleep(Duration::from_millis(2)) => continue,
+                                };
+                                let Some(Ok((request, mut respond))) = incoming else {
+                                    break;
+                                };
                                 assert_eq!(request.uri().path(), "/dns-query");
                                 assert_eq!(request.uri().port_u16(), Some(address.port()));
                                 assert_eq!(request.method(), http::Method::POST);
@@ -237,19 +307,16 @@ impl TestServer {
                                     }
                                     if let Some(response) = answers.answer(&wire).await {
                                         let mode = answers.mode.load(Ordering::Relaxed);
-                                        let headers = http::Response::builder()
-                                            .status(if mode == 6 { 503 } else { 200 })
-                                            .header(
-                                                "content-type",
-                                                if mode == 5 {
-                                                    "text/plain"
-                                                } else {
-                                                    "application/dns-message"
-                                                },
-                                            )
-                                            .header("age", if mode == 7 { "30" } else { "0" })
-                                            .body(())
-                                            .unwrap();
+                                        if matches!(mode, 16 | 17) && bad_query(&wire) {
+                                            respond.send_reset(if mode == 16 {
+                                                h2::Reason::CANCEL
+                                            } else {
+                                                h2::Reason::REFUSED_STREAM
+                                            });
+                                            return;
+                                        }
+                                        let (headers, response) =
+                                            http_response(mode, &wire, response);
                                         if let Ok(mut stream) =
                                             respond.send_response(headers, false)
                                         {
@@ -290,7 +357,7 @@ impl TestServer {
             url: format!(
                 "{transport}://localhost:{}{}?bootstrap=127.0.0.1",
                 address.port(),
-                if transport == "https" {
+                if matches!(transport, "https" | "h3") {
                     "/dns-query"
                 } else {
                     ""
@@ -345,6 +412,41 @@ impl TestServer {
         };
         DnsResolver::with_tls(config, DialPolicy::default(), tls).unwrap()
     }
+}
+
+fn bad_query(wire: &[u8]) -> bool {
+    Message::from_vec(wire).unwrap().queries[0]
+        .name()
+        .to_ascii()
+        .starts_with("bad.")
+}
+
+fn http_response(mode: u8, query: &[u8], mut wire: Vec<u8>) -> (http::Response<()>, Vec<u8>) {
+    let bad = bad_query(query);
+    let mut headers = http::Response::builder()
+        .status(if mode == 6 || (mode == 18 && bad) {
+            503
+        } else {
+            200
+        })
+        .header(
+            "content-type",
+            if mode == 5 {
+                "text/plain"
+            } else {
+                "application/dns-message"
+            },
+        )
+        .header("age", if mode == 7 { "30" } else { "0" });
+    if bad {
+        match mode {
+            19 => wire = vec![0, 1, 2],
+            20 => headers = headers.header("content-length", "65536"),
+            21 => wire = vec![0; 65536],
+            _ => {}
+        }
+    }
+    (headers.body(()).unwrap(), wire)
 }
 
 fn request(name: &str, id: u16) -> Message {

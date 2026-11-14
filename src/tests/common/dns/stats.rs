@@ -7,26 +7,28 @@ use super::*;
 
 #[tokio::test]
 async fn snapshots_are_passive_and_expose_only_upstream_transport_host_and_port() {
-    let mut server = TestServer::new("https").await;
-    let mut url = url::Url::parse(&server.url).unwrap();
-    url.set_path("/private-account-id");
-    server.url = url.to_string();
-    let resolver = server.resolver(&[]);
-    for _ in 0..10 {
-        let snapshot = resolver.snapshot();
-        assert_eq!(snapshot.preferred_upstream, Some(0));
-        assert_eq!(snapshot.last_upstream, None);
-        assert_eq!(snapshot.queries, 0);
-        assert_eq!(snapshot.cache_entries, 0);
-        assert_eq!(snapshot.in_flight, 0);
-        let wire = serde_json::to_string(&snapshot).unwrap();
-        assert!(wire.contains("https://localhost:"));
-        assert!(!wire.contains("private-account-id"));
-        assert!(!wire.contains("bootstrap"));
+    for transport in ["https", "h3"] {
+        let mut server = TestServer::new(transport).await;
+        let mut url = url::Url::parse(&server.url).unwrap();
+        url.set_path("/private-account-id");
+        server.url = url.to_string();
+        let resolver = server.resolver(&[]);
+        for _ in 0..10 {
+            let snapshot = resolver.snapshot();
+            assert_eq!(snapshot.preferred_upstream, Some(0));
+            assert_eq!(snapshot.last_upstream, None);
+            assert_eq!(snapshot.queries, 0);
+            assert_eq!(snapshot.cache_entries, 0);
+            assert_eq!(snapshot.in_flight, 0);
+            let wire = serde_json::to_string(&snapshot).unwrap();
+            assert!(wire.contains(&format!("{transport}://localhost:")));
+            assert!(!wire.contains("private-account-id"));
+            assert!(!wire.contains("bootstrap"));
+        }
+        assert_eq!(server.count.load(Ordering::Relaxed), 0);
+        assert_eq!(server.connections.load(Ordering::Relaxed), 0);
+        assert!(resolver.probes.get().is_none());
     }
-    assert_eq!(server.count.load(Ordering::Relaxed), 0);
-    assert_eq!(server.connections.load(Ordering::Relaxed), 0);
-    assert!(resolver.probes.get().is_none());
 }
 
 #[tokio::test]
