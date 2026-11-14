@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,11 +18,20 @@ use hickory_net::xfer::{DnsExchange, DnsMultiplexer};
 use rustls::pki_types::ServerName;
 use tokio::net::lookup_host;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 use crate::common::{AddressFamily, DialPolicy, Logger, filter_addrs_for_family};
 
 use super::config::{Transport, UpstreamConfig};
 use super::https::HttpsSession;
+
+#[derive(Default)]
+struct Counters {
+    queries: AtomicU64,
+    failures: AtomicU64,
+    probes: AtomicU64,
+    last_latency_us: AtomicU64,
+}
 
 type Exchange = DnsExchange<TokioRuntimeProvider>;
 
@@ -48,6 +57,7 @@ pub(super) struct Upstream {
     session: Mutex<Session>,
     // Keep the provider alive: it owns the encrypted sessions' background tasks.
     provider: TokioRuntimeProvider,
+    counters: Counters,
 }
 
 impl Upstream {
@@ -67,6 +77,7 @@ impl Upstream {
             session: Mutex::new(Session::default()),
             provider: TokioRuntimeProvider::new(),
             unhealthy: AtomicBool::new(false),
+            counters: Counters::default(),
         }
     }
 
@@ -79,17 +90,69 @@ impl Upstream {
         }
     }
 
+    pub(super) fn mark_timed_out(&self) {
+        self.counters.failures.fetch_add(1, Ordering::Relaxed);
+        self.mark_unhealthy();
+    }
+
     pub(super) async fn query(&self, request: &Message) -> Result<Message> {
+        self.execute(request, false).await
+    }
+
+    pub(super) async fn probe(&self, request: &Message) -> Result<Message> {
+        self.execute(request, true).await
+    }
+
+    async fn execute(&self, request: &Message, probe: bool) -> Result<Message> {
+        let started = Instant::now();
+        let counter = if probe {
+            &self.counters.probes
+        } else {
+            &self.counters.queries
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         let result = tokio::time::timeout(self.timeout, self.query_inner(request))
             .await
             .context("DNS upstream timeout")
             .and_then(|result| result);
         if result.is_err() {
+            if !probe {
+                self.counters.failures.fetch_add(1, Ordering::Relaxed);
+            }
             self.mark_unhealthy();
         } else if self.unhealthy.swap(false, Ordering::Relaxed) {
             Logger.info(format_args!("dns upstream {} recovered", self.index));
         }
+        if !probe && result.is_ok() {
+            self.counters.last_latency_us.store(
+                (started.elapsed().as_micros().min(u64::MAX as u128) as u64).saturating_add(1),
+                Ordering::Relaxed,
+            );
+        }
         result
+    }
+
+    pub(super) fn snapshot(&self, fallback: bool) -> crate::telemetry::DnsUpstreamSnapshot {
+        let scheme = match self.config.transport {
+            Transport::Https => "https",
+            Transport::Tls => "tls",
+            Transport::Quic => "quic",
+        };
+        let host = if self.config.host.contains(':') {
+            format!("[{}]", self.config.host)
+        } else {
+            self.config.host.clone()
+        };
+        let latency = self.counters.last_latency_us.load(Ordering::Relaxed);
+        crate::telemetry::DnsUpstreamSnapshot {
+            endpoint: format!("{scheme}://{host}:{}", self.config.port),
+            fallback,
+            healthy: !self.unhealthy.load(Ordering::Relaxed),
+            queries: self.counters.queries.load(Ordering::Relaxed),
+            failures: self.counters.failures.load(Ordering::Relaxed),
+            probes: self.counters.probes.load(Ordering::Relaxed),
+            last_latency_us: (latency != 0).then(|| latency - 1),
+        }
     }
 
     async fn query_inner(&self, request: &Message) -> Result<Message> {

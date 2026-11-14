@@ -23,6 +23,7 @@ pub(crate) struct TelemetryServer {
     pub(super) endpoint: String,
     descriptor: Arc<crate::telemetry::wire::InstanceDescriptor>,
     stats: Arc<crate::transport::Stats>,
+    dns: Option<Arc<crate::common::dns::DnsResolver>>,
     clients: Arc<Semaphore>,
     pub(super) registry_path: PathBuf,
 }
@@ -67,9 +68,15 @@ impl TelemetryServer {
             endpoint,
             descriptor: Arc::new(descriptor),
             stats,
+            dns: None,
             clients: Arc::new(Semaphore::new(MAX_CLIENTS)),
             registry_path,
         })
+    }
+
+    pub(crate) fn with_dns(mut self, dns: Option<Arc<crate::common::dns::DnsResolver>>) -> Self {
+        self.dns = dns;
+        self
     }
 
     pub(crate) async fn run(mut self, shutdown: CancellationToken) {
@@ -93,10 +100,11 @@ impl TelemetryServer {
             };
             let descriptor = Arc::clone(&self.descriptor);
             let stats = Arc::clone(&self.stats);
+            let dns = self.dns.clone();
             let connection_shutdown = shutdown.clone();
             tasks.spawn(async move {
                 let _permit = permit;
-                let _ = serve_client(stream, descriptor, stats, connection_shutdown).await;
+                let _ = serve_client(stream, descriptor, stats, dns, connection_shutdown).await;
             });
         }
         tasks.abort_all();
@@ -108,6 +116,7 @@ async fn serve_client(
     stream: Stream,
     descriptor: Arc<crate::telemetry::wire::InstanceDescriptor>,
     stats: Arc<crate::transport::Stats>,
+    dns: Option<Arc<crate::common::dns::DnsResolver>>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let (mut reader, mut writer) = tokio::io::split(stream);
@@ -126,7 +135,9 @@ async fn serve_client(
             _ = shutdown.cancelled() => return Ok(()),
             read = reader.read(&mut discard) => { if read? == 0 { return Ok(()); } },
             _ = ticks.tick() => {
-                write_frame(&mut writer, &ServerMessage::Snapshot(stats.snapshot())).await?;
+                let mut snapshot = stats.snapshot();
+                snapshot.dns = dns.as_ref().map(|resolver| resolver.snapshot());
+                write_frame(&mut writer, &ServerMessage::Snapshot(snapshot)).await?;
             }
         }
     }

@@ -5,6 +5,7 @@
 
 mod caching;
 mod configuration;
+mod stats;
 mod transport;
 
 use std::net::SocketAddr;

@@ -23,7 +23,9 @@ impl Egress {
             self.config.endpoint(),
             self.forward.stats.clone(),
         ) {
-            Ok(server) => Some(tokio::spawn(server.run(stop.clone()))),
+            Ok(server) => Some(tokio::spawn(
+                server.with_dns(self.forward.dns.clone()).run(stop.clone()),
+            )),
             Err(error) => {
                 self.forward
                     .logger

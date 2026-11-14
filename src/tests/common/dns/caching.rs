@@ -140,6 +140,12 @@ async fn concurrent_cache_misses_share_work_and_restore_each_clients_id_and_ques
     assert_eq!(server.count.load(Ordering::Relaxed), 1);
     assert!(resolver.flights.lock().unwrap().is_empty());
     assert_eq!(resolver.queries.available_permits(), 128);
+    let snapshot = resolver.snapshot();
+    assert_eq!(snapshot.queries, 64);
+    assert_eq!(snapshot.cache_hits + snapshot.deduplicated, 63);
+    assert!(snapshot.deduplicated > 0);
+    assert_eq!(snapshot.cache_misses + snapshot.cache_hits, 64);
+    assert_eq!(snapshot.upstreams[0].queries, 1);
 }
 
 #[tokio::test]
@@ -159,4 +165,11 @@ async fn optimistic_answer_does_not_wait_for_a_broken_upstream_and_refresh_is_de
     }
     assert!(start.elapsed() < Duration::from_millis(50));
     assert!(resolver.flights.lock().unwrap().len() <= 1);
+    let snapshot = resolver.snapshot();
+    assert_eq!(snapshot.queries, 30);
+    assert_eq!(snapshot.stale_hits, 29);
+    assert_eq!(snapshot.cache_hits, 0);
+    assert_eq!(snapshot.cache_misses, 1);
+    assert_eq!(snapshot.refreshes, 1);
+    assert_eq!(snapshot.cache_entries, 1);
 }

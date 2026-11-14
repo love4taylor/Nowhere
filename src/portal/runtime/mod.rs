@@ -49,7 +49,11 @@ impl Portal {
             forward.stats.clone(),
         ) {
             Ok(server) => {
-                observation.spawn(server.run(telemetry_stop.clone()));
+                observation.spawn(
+                    server
+                        .with_dns(forward.dns.clone())
+                        .run(telemetry_stop.clone()),
+                );
             }
             Err(error) => forward
                 .logger

@@ -6,7 +6,7 @@
 use super::*;
 
 #[test]
-fn snapshots_have_only_six_statistics() {
+fn snapshots_without_dns_keep_the_six_legacy_statistics() {
     let value = serde_json::to_value(TelemetrySnapshot::default()).unwrap();
     assert_eq!(value.as_object().unwrap().len(), 6);
     for field in [
@@ -19,12 +19,39 @@ fn snapshots_have_only_six_statistics() {
     ] {
         assert_eq!(value[field], 0);
     }
+    let legacy: TelemetrySnapshot = serde_json::from_value(value).unwrap();
+    assert!(legacy.dns.is_none());
     for kind in ["unknown", "", "HELLO", "SNAPSHOT"] {
         assert!(
             serde_json::from_value::<ServerMessage>(serde_json::json!({"type":kind,"data":{}}))
                 .is_err()
         );
     }
+}
+
+#[test]
+fn optional_dns_statistics_round_trip_and_reject_unknown_fields() {
+    let snapshot = TelemetrySnapshot {
+        dns: Some(DnsSnapshot {
+            queries: u64::MAX,
+            last_upstream: Some(0),
+            preferred_upstream: Some(0),
+            upstreams: vec![DnsUpstreamSnapshot {
+                endpoint: "tls://1.1.1.1:853".to_owned(),
+                healthy: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut value = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(
+        serde_json::from_value::<TelemetrySnapshot>(value.clone()).unwrap(),
+        snapshot
+    );
+    value["dns"]["unexpected"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<TelemetrySnapshot>(value).is_err());
 }
 
 #[test]

@@ -24,6 +24,7 @@ impl Stats {
             udp_download_bytes: self.udp_download_bytes.load(Ordering::Relaxed),
             tcp_active: i64::from(self.tcp_active.load(Ordering::Relaxed)),
             udp_active: i64::from(self.udp_active.load(Ordering::Relaxed)),
+            dns: None,
         }
     }
 
