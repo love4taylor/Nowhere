@@ -144,9 +144,9 @@ async fn connect_tcp_candidates(
     addresses: Vec<SocketAddr>,
 ) -> Result<TcpStream> {
     if policy.tcp_concurrent() {
-        return first_success(addresses.into_iter().map(|address| async move {
+        return race_tcp_candidates(policy, addresses, |address| async move {
             connect_tcp_addr(policy.local_ip(address.ip())?, address).await
-        }))
+        })
         .await;
     }
     let mut last_err = None;
@@ -157,6 +157,28 @@ async fn connect_tcp_candidates(
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow!("common::util::dial_tcp_from_local_ip: no target address matches configured address family")))
+}
+
+pub(super) async fn race_tcp_candidates<T, F: Future<Output = Result<T>>>(
+    policy: &DialPolicy,
+    addresses: Vec<SocketAddr>,
+    connect: impl Fn(SocketAddr) -> F,
+) -> Result<T> {
+    let preference = policy.preference();
+    if preference == AddressPreference::Default {
+        return first_success(addresses.into_iter().map(connect)).await;
+    }
+    let (preferred, fallback): (Vec<_>, Vec<_>) = addresses
+        .into_iter()
+        .partition(|address| address.is_ipv4() == (preference == AddressPreference::Ipv4));
+    if !preferred.is_empty() {
+        match first_success(preferred.into_iter().map(&connect)).await {
+            Ok(value) => return Ok(value),
+            Err(error) if fallback.is_empty() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    first_success(fallback.into_iter().map(connect)).await
 }
 
 /// Dropping the race on success, timeout or cancellation closes all losing sockets.

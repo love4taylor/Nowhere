@@ -147,17 +147,23 @@ preserves resolver order. Literal target IPs and source address restrictions
 still apply. With a SOCKS5 upstream, preference affects the proxy and UDP relay
 addresses resolved by Portal; target domains are sent to the proxy unchanged.
 
-`tcp-concurrent=1` starts TCP connection attempts to all eligible resolved
-addresses concurrently and uses the first success. Other attempts are closed
-when a winner is selected, the dial times out or the Flow is cancelled. DNS
+`tcp-concurrent=1` starts TCP connection attempts concurrently within the
+address group selected by `prefer` and uses the first success. Other attempts
+are closed when a winner is selected, the dial times out or the Flow is cancelled. DNS
 resolution and every attempt share the existing TCP dial timeout. Source address
 binding and family restrictions apply to each candidate. A literal target IP
 still produces a single attempt.
 
-With `prefer` also set, the preferred family is polled first, but both families
-race without a delay; either family can win. Leave `tcp-concurrent=0` (the default)
-to try addresses sequentially in preference order. UDP Flows, including SOCKS5
-UDP associations, retain their existing sequential setup.
+`prefer` takes precedence over concurrency. With `prefer=ipv4`, all eligible
+IPv4 addresses race first; only after every IPv4 attempt fails do IPv6 addresses
+race. `prefer=ipv6` reverses the groups. If the preferred family has no eligible
+addresses, the other family starts immediately. A pending preferred attempt
+continues until it fails or the shared dial timeout expires; timeout ends the
+Flow without granting the fallback group another timeout.
+With `prefer=default` (or omission), all eligible addresses race together.
+Leave `tcp-concurrent=0` (the default) to try addresses sequentially in
+preference order. UDP Flows, including SOCKS5 UDP associations, retain their
+existing sequential setup.
 
 For a SOCKS5 upstream, the race uses the proxy's resolved addresses and a
 candidate succeeds after SOCKS authentication and CONNECT finish. Target domains

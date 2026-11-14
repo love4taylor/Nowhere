@@ -6,6 +6,79 @@
 use super::*;
 
 #[tokio::test]
+async fn concurrent_proxy_respects_preference_through_handshake_and_then_falls_back() {
+    for preference in ["ipv4", "ipv6"] {
+        for preferred_fails in [false, true] {
+            let listener4 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener4.local_addr().unwrap().port();
+            let listener6 =
+                match TcpListener::bind(SocketAddr::new("::1".parse().unwrap(), port)).await {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        eprintln!(
+                            "SKIP preferred concurrent proxy: IPv6 loopback unavailable: {error}"
+                        );
+                        return;
+                    }
+                };
+            let (preferred, fallback) = if preference == "ipv4" {
+                (&listener4, &listener6)
+            } else {
+                (&listener6, &listener4)
+            };
+            let config = parse(&format!(
+                "portal://secret@127.0.0.1:2000?out=localhost:{port}"
+            ))
+            .unwrap();
+            let policy = DialPolicy::from_query(&std::collections::HashMap::from([
+                ("tcp-concurrent".to_owned(), "1".to_owned()),
+                ("prefer".to_owned(), preference.to_owned()),
+            ]))
+            .unwrap();
+            let dialer = OutboundDialer::new(policy, config);
+            let server = async {
+                let (mut stream, _) = preferred.accept().await.unwrap();
+                let mut greeting = [0; 3];
+                stream.read_exact(&mut greeting).await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(30), fallback.accept())
+                        .await
+                        .is_err()
+                );
+                if preferred_fails {
+                    stream.write_all(&[SOCKS_VERSION, 0xff]).await.unwrap();
+                    drop(stream);
+                    stream = fallback.accept().await.unwrap().0;
+                    stream.read_exact(&mut greeting).await.unwrap();
+                }
+                stream.write_all(&[SOCKS_VERSION, AUTH_NONE]).await.unwrap();
+                assert_eq!(
+                    read_test_command(&mut stream).await,
+                    (COMMAND_CONNECT, "target.test".to_owned(), 443)
+                );
+                write_test_reply(&mut stream, SocketAddr::from(([127, 0, 0, 1], 50000))).await;
+            };
+            let client = async {
+                let target = Target::domain("target.test", 443).unwrap();
+                let stream = dialer
+                    .dial_tcp_target(&target, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    stream.peer_addr().unwrap().is_ipv4(),
+                    (preference == "ipv4") != preferred_fails
+                );
+            };
+            tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(server, client);
+            })
+            .await
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn concurrent_proxy_connections_bypass_stalled_handshakes_and_close_losers() {
     let listener4 = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener4.local_addr().unwrap().port();
@@ -22,7 +95,7 @@ async fn concurrent_proxy_connections_bypass_stalled_handshakes_and_close_losers
     .unwrap();
     let policy = DialPolicy::from_query(&std::collections::HashMap::from([
         ("tcp-concurrent".to_owned(), "1".to_owned()),
-        ("prefer".to_owned(), "ipv6".to_owned()),
+        ("prefer".to_owned(), "default".to_owned()),
         ("dial4".to_owned(), "127.0.0.1".to_owned()),
         ("dial6".to_owned(), "::1".to_owned()),
     ]))

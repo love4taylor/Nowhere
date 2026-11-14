@@ -14,6 +14,115 @@ impl Drop for AttemptGuard {
 }
 
 #[tokio::test]
+async fn preferred_family_races_before_fallback_even_when_addresses_are_unsorted() {
+    for preference in ["ipv4", "ipv6"] {
+        for preferred_fails in [false, true] {
+            let policy = DialPolicy::from_query(&std::collections::HashMap::from([
+                ("prefer".to_owned(), preference.to_owned()),
+                ("tcp-concurrent".to_owned(), "1".to_owned()),
+            ]))
+            .unwrap();
+            let addresses: Vec<SocketAddr> = ["127.0.0.1:1", "[::1]:1", "127.0.0.1:2", "[::1]:2"]
+                .map(|address| address.parse().unwrap())
+                .to_vec();
+            let started = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let preferred = |address: SocketAddr| address.is_ipv4() == (preference == "ipv4");
+            let result = race_tcp_candidates(&policy, addresses, |address| {
+                let started = started.clone();
+                async move {
+                    if !preferred(address) {
+                        assert!(preferred_fails);
+                        let order = started.borrow();
+                        assert_eq!(order.iter().filter(|&&addr| preferred(addr)).count(), 2);
+                    }
+                    started.borrow_mut().push(address);
+                    // Both preferred attempts must start before either completes.
+                    tokio::task::yield_now().await;
+                    if preferred(address) && preferred_fails {
+                        Err(anyhow!("preferred failed"))
+                    } else {
+                        Ok(address)
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(preferred(result), !preferred_fails);
+            if !preferred_fails {
+                assert_eq!(started.borrow().len(), 2);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn preferred_family_timeout_cancels_attempts_without_starting_fallback() {
+    for preference in ["ipv4", "ipv6"] {
+        let policy = DialPolicy::from_query(&std::collections::HashMap::from([(
+            "prefer".to_owned(),
+            preference.to_owned(),
+        )]))
+        .unwrap();
+        let addresses = ["127.0.0.1:1", "[::1]:1"]
+            .map(|address| address.parse().unwrap())
+            .to_vec();
+        let dropped = std::rc::Rc::new(std::cell::Cell::new(0));
+        let race = race_tcp_candidates(&policy, addresses, |address| {
+            let dropped = dropped.clone();
+            async move {
+                assert_eq!(address.is_ipv4(), preference == "ipv4");
+                let _guard = AttemptGuard(dropped);
+                std::future::pending::<Result<()>>().await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), race)
+                .await
+                .is_err()
+        );
+        assert_eq!(dropped.get(), 1);
+    }
+}
+
+#[tokio::test]
+async fn preferred_family_absent_and_all_failed_groups_return_without_hanging() {
+    for preference in ["ipv4", "ipv6"] {
+        let policy = DialPolicy::from_query(&std::collections::HashMap::from([(
+            "prefer".to_owned(),
+            preference.to_owned(),
+        )]))
+        .unwrap();
+        let fallback: SocketAddr = if preference == "ipv4" {
+            "[::1]:1"
+        } else {
+            "127.0.0.1:1"
+        }
+        .parse()
+        .unwrap();
+        let result =
+            race_tcp_candidates(&policy, vec![fallback], |addr| std::future::ready(Ok(addr)))
+                .await
+                .unwrap();
+        assert_eq!(result, fallback);
+        let addresses = ["127.0.0.1:1", "[::1]:1"]
+            .map(|addr| addr.parse().unwrap())
+            .to_vec();
+        assert!(
+            race_tcp_candidates(&policy, addresses, |_| std::future::ready(Err::<(), _>(
+                anyhow!("failed")
+            )))
+            .await
+            .is_err()
+        );
+        assert!(
+            race_tcp_candidates(&policy, vec![], |_| std::future::ready(Ok(())))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn concurrent_attempts_skip_failures_and_release_losers_on_success() {
     let started = std::rc::Rc::new(std::cell::Cell::new(0));
     let dropped = std::rc::Rc::new(std::cell::Cell::new(0));
