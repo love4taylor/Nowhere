@@ -25,7 +25,7 @@ pub use config::{
 pub(crate) use datagram::{
     BudgetedDatagram, UdpDatagramSend, reserve_udp_budget, send_quic_udp_packet,
 };
-pub(crate) use dial::DialPolicy;
+pub(crate) use dial::{AddressPreference, DialPolicy};
 pub use endpoint::validate_endpoint_url_input;
 pub(crate) use endpoint::{AddressFamily, CarrierEndpoint, ServiceEndpoint};
 pub(crate) use lifecycle::ShutdownSignals;

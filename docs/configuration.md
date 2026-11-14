@@ -121,6 +121,7 @@ Portal listens on `ENDPOINT` and uses one fixed `out` for all Flows.
 | Parameter | Accepted value | Default | Purpose |
 |---|---|---|---|
 | `out` | `direct`, `egress` or `[USER:PASS@]HOST:PORT` | `direct` | Direct target access, registered Egress or a SOCKS5 upstream |
+| `prefer` | `ipv4`, `ipv6` or `default` | `default` | Address family tried first for DNS-resolved Portal outbound connections |
 | `tls` | `1` or `2` | `1` | Generated certificate (`1`) or supplied PEM files (`2`) for TLS and QUIC |
 | `crt` | Certificate-chain PEM path | Absent | Required exactly when `tls=2` |
 | `key` | Private-key PEM path | Absent | Required exactly when `tls=2` |
@@ -134,8 +135,8 @@ Portal listens on `ENDPOINT` and uses one fixed `out` for all Flows.
 | `etar` | `0..=2147483647` Mbps | `0` | Target-to-Vector download limit; `0` disables it |
 
 `out=egress` accepts Egress on any enabled TLS or QUIC listener and conflicts
-with explicit `dial`, `dial4` or `dial6`, including `auto`. See [Egress](egress.md) for registration and offline
-behavior.
+with explicit `dial`, `dial4`, `dial6` or `prefer`, including their default values.
+See [Egress](egress.md) for registration and offline behavior.
 
 ### Target source selection
 
@@ -143,6 +144,13 @@ behavior.
 form, an omitted family uses `auto`. Explicit source binding errors fail the
 dial; they do not trigger an unbound retry. Portal applies these settings to
 its own outbound work, including connections to a SOCKS5 upstream.
+
+`prefer=ipv4` or `prefer=ipv6` tries DNS addresses of the selected family first,
+preserving resolver order within each family. Connection failures can fall back
+to the other family within the same dial timeout. `prefer=default` (or omission)
+preserves resolver order. Literal target IPs and source address restrictions
+still apply. With a SOCKS5 upstream, preference affects the proxy and UDP relay
+addresses resolved by Portal; target domains are sent to the proxy unchanged.
 
 A SOCKS5 upstream must support UDP ASSOCIATE to carry UDP Flows. Failure to
 establish that association fails the affected Flow.
@@ -250,6 +258,7 @@ A dash means that the role does not recognize the parameter.
 | `dial` | IP literal, `auto` | `auto` | Yes | — | Yes |
 | `dial4` | IPv4 literal, `auto` | `auto` | Yes | — | Yes |
 | `dial6` | IPv6 literal, `auto` | `auto` | Yes | — | Yes |
+| `prefer` | `ipv4`, `ipv6`, `default` | `default` | Yes | — | — |
 | `morph` | `0`, `1` | `1` | Yes | Yes | Yes |
 | `grade` | `full`, `core` | `full` | Yes | Yes | Yes |
 | `cipher` | `chacha`, `aes` | `chacha` | Yes | Yes | Yes |
