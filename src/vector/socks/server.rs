@@ -112,6 +112,9 @@ async fn handle_client(
     peer: SocketAddr,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    stream
+        .set_nodelay(true)
+        .context("vector::socks::handle_client: failed to set TCP_NODELAY")?;
     let request = tokio::select! {
         biased;
         _ = shutdown.cancelled() => return Ok(()),
