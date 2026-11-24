@@ -24,7 +24,6 @@ fn global_allocator_uses_mimalloc_3_6_1() {
     assert!(owned, "Rust global allocations must belong to mimalloc");
 }
 
-
 #[tokio::test]
 async fn fingerprint_rejects_invalid_raw_share_links_before_network_access() {
     const KEY: &str = "0123456789abcdef0123456789abcdef";

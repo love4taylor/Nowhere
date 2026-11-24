@@ -76,12 +76,12 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
             "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
         ),
         (
-            "?grade=core&cipher=aes",
-            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&grade=core&cipher=aes&rate=0&etar=0",
-        ),
-        (
             "?prefer=ipv4&tcp-concurrent=1",
             "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&prefer=ipv4&tcp-concurrent=1&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
+        ),
+        (
+            "?prefer=ipv4&tcp-concurrent=1&grade=core&cipher=aes&dns=udp://1.1.1.1&dns-hijack=1",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&prefer=ipv4&tcp-concurrent=1&morph=1&grade=core&cipher=aes&rate=0&etar=0&dns=plaintext&dns-hijack=1",
         ),
         (
             "?tcp-concurrent=0",
@@ -90,6 +90,10 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
         (
             "?out=localhost:1080&tcp-concurrent=1",
             "portal://127.0.0.1:2000?out=localhost:1080&tls=1&dial=auto&tcp-concurrent=1&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
+        ),
+        (
+            "?grade=core&cipher=aes",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&grade=core&cipher=aes&rate=0&etar=0",
         ),
     ] {
         let portal = Portal::new(

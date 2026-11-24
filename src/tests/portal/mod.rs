@@ -78,7 +78,8 @@ impl Harness {
         Self::configured_inner_cipher(out, morph, host, cipher, |inner| {
             configure(&mut inner.runtime);
             Arc::get_mut(&mut inner.forward).unwrap().runtime = inner.runtime;
-        }).await
+        })
+        .await
     }
 
     async fn configured_inner(
