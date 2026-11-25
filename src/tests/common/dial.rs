@@ -126,7 +126,6 @@ fn first_duplicate_is_selected_even_when_later_values_are_invalid() {
 fn address_preference_validates_values_and_first_duplicates() {
     for (query, expected) in [
         ("", AddressPreference::Default),
-        ("prefer=default", AddressPreference::Default),
         ("prefer=ipv4", AddressPreference::Ipv4),
         ("prefer=ipv6", AddressPreference::Ipv6),
         ("prefer=ipv6&prefer=%GG", AddressPreference::Ipv6),
@@ -134,7 +133,7 @@ fn address_preference_validates_values_and_first_duplicates() {
     ] {
         assert_eq!(parse(query).unwrap().preference(), expected);
     }
-    for value in ["", "auto", "4", "6", "IPv4", "ipv6%20", "%GG"] {
+    for value in ["", "auto", "default", "4", "6", "IPv4", "ipv6%20", "%GG"] {
         assert!(
             parse(&format!("prefer={value}")).is_err(),
             "accepted {value}"

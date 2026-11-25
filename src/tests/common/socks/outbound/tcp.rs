@@ -95,7 +95,7 @@ async fn concurrent_proxy_connections_bypass_stalled_handshakes_and_close_losers
     .unwrap();
     let policy = DialPolicy::from_query(&std::collections::HashMap::from([
         ("tcp-concurrent".to_owned(), "1".to_owned()),
-        ("prefer".to_owned(), "default".to_owned()),
+        ("prefer".to_owned(), "ipv6".to_owned()),
         ("dial4".to_owned(), "127.0.0.1".to_owned()),
         ("dial6".to_owned(), "::1".to_owned()),
     ]))

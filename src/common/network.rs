@@ -3,15 +3,19 @@
 
 //! Network binding and outbound dial helpers.
 
-use std::future::{Future, poll_fn};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use futures_util::{StreamExt, future::select_ok, stream::FuturesUnordered};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket, lookup_host};
+use tokio::time::{Instant, sleep_until, timeout};
 
 use super::{AddressFamily, AddressPreference, CarrierEndpoint, DialPolicy};
+
+const TCP_FAMILY_FALLBACK_DELAY: Duration = Duration::from_millis(250);
+const TCP_ATTEMPT_BUDGET: Duration = Duration::from_secs(2);
 
 pub(crate) fn configure_tcp_listener(socket: &socket2::Socket) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -98,6 +102,7 @@ pub fn bind_udp_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
     Ok(vec![addr])
 }
 
+/// Dials a TCP carrier sequentially in policy order.
 pub(crate) async fn dial_tcp_with_policy(
     policy: &DialPolicy,
     target: &str,
@@ -109,7 +114,14 @@ pub(crate) async fn dial_tcp_with_policy(
             format!("common::util::dial_tcp_from_local_ip: failed to resolve target: {target}")
         })?;
 
-        connect_tcp_candidates(policy, filter_addrs_for_family(addrs, policy, family)).await
+        let mut last_err = None;
+        for address in filter_addrs_for_family(addrs, policy, family) {
+            match connect_tcp_addr(policy.local_ip(address.ip())?, address).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last_err = Some(error),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("common::util::dial_tcp_from_local_ip: no target address matches configured address family")))
     };
 
     tokio::time::timeout(timeout, connect)
@@ -142,76 +154,104 @@ pub(crate) async fn dial_udp_with_policy(
 pub(super) async fn connect_tcp_candidates(
     policy: &DialPolicy,
     addresses: Vec<SocketAddr>,
+    deadline: Instant,
 ) -> Result<TcpStream> {
-    if policy.tcp_concurrent() {
-        return race_tcp_candidates(policy, addresses, |address| async move {
-            connect_tcp_addr(policy.local_ip(address.ip())?, address).await
-        })
-        .await;
-    }
-    let mut last_err = None;
-    for address in addresses {
-        match connect_tcp_addr(policy.local_ip(address.ip())?, address).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_err = Some(error),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| anyhow!("common::util::dial_tcp_from_local_ip: no target address matches configured address family")))
-}
-
-pub(super) async fn race_tcp_candidates<T, F: Future<Output = Result<T>>>(
-    policy: &DialPolicy,
-    addresses: Vec<SocketAddr>,
-    connect: impl Fn(SocketAddr) -> F,
-) -> Result<T> {
-    let preference = policy.preference();
-    if preference == AddressPreference::Default {
-        return first_success(addresses.into_iter().map(connect)).await;
-    }
-    let (preferred, fallback): (Vec<_>, Vec<_>) = addresses
-        .into_iter()
-        .partition(|address| address.is_ipv4() == (preference == AddressPreference::Ipv4));
-    if !preferred.is_empty() {
-        match first_success(preferred.into_iter().map(&connect)).await {
-            Ok(value) => return Ok(value),
-            Err(error) if fallback.is_empty() => return Err(error),
-            Err(_) => {}
-        }
-    }
-    first_success(fallback.into_iter().map(connect)).await
-}
-
-/// Dropping the race on success, timeout or cancellation closes all losing sockets.
-pub(super) async fn first_success<T, F: Future<Output = Result<T>>>(
-    attempts: impl IntoIterator<Item = F>,
-) -> Result<T> {
-    let mut pending: Vec<_> = attempts
-        .into_iter()
-        .map(|attempt| Some(Box::pin(attempt)))
-        .collect();
-    let mut last_err = None;
-    poll_fn(|cx| {
-        let mut waiting = false;
-        for attempt in &mut pending {
-            let Some(future) = attempt else { continue };
-            match future.as_mut().poll(cx) {
-                Poll::Ready(Ok(value)) => return Poll::Ready(Ok(value)),
-                Poll::Ready(Err(error)) => {
-                    last_err = Some(error);
-                    *attempt = None;
-                }
-                Poll::Pending => waiting = true,
-            }
-        }
-        if waiting {
-            Poll::Pending
-        } else {
-            Poll::Ready(Err(last_err
-                .take()
-                .unwrap_or_else(|| anyhow!("no connection candidates"))))
-        }
+    dial_tcp_candidates(policy, addresses, deadline, |address| async move {
+        connect_tcp_addr(policy.local_ip(address.ip())?, address).await
     })
     .await
+}
+
+/// The caller enforces the shared deadline, including time spent resolving addresses.
+pub(super) async fn dial_tcp_candidates<T, F: Future<Output = Result<T>>>(
+    policy: &DialPolicy,
+    addresses: Vec<SocketAddr>,
+    deadline: Instant,
+    connect: impl Fn(SocketAddr) -> F,
+) -> Result<T> {
+    let Some(first) = addresses.first() else {
+        return Err(anyhow!(
+            "no target address matches configured address family"
+        ));
+    };
+    let concurrent = policy.tcp_concurrent();
+    if addresses
+        .iter()
+        .all(|address| address.is_ipv4() == first.is_ipv4())
+    {
+        return dial_tcp_family(addresses, concurrent, deadline, &connect).await;
+    }
+
+    let prefer_ipv4 = match policy.preference() {
+        AddressPreference::Default => first.is_ipv4(),
+        AddressPreference::Ipv4 => true,
+        AddressPreference::Ipv6 => false,
+    };
+    let (primary, fallback) = addresses
+        .into_iter()
+        .partition(|address| address.is_ipv4() == prefer_ipv4);
+
+    let now = Instant::now();
+    let delay = TCP_FAMILY_FALLBACK_DELAY.min(deadline.saturating_duration_since(now) / 2);
+    let mut primary = std::pin::pin!(dial_tcp_family(primary, concurrent, deadline, &connect));
+    tokio::select! {
+        biased;
+        result = &mut primary => {
+            return match result {
+                Ok(value) => Ok(value),
+                Err(_) => dial_tcp_family(fallback, concurrent, deadline, &connect).await,
+            };
+        }
+        _ = sleep_until(now + delay) => {}
+    }
+
+    let fallback = std::pin::pin!(dial_tcp_family(fallback, concurrent, deadline, &connect));
+    select_ok([primary, fallback]).await.map(|(value, _)| value)
+}
+
+async fn dial_tcp_family<T, F: Future<Output = Result<T>>>(
+    addresses: Vec<SocketAddr>,
+    concurrent: bool,
+    deadline: Instant,
+    connect: &impl Fn(SocketAddr) -> F,
+) -> Result<T> {
+    if let [address] = addresses.as_slice() {
+        return connect(*address).await;
+    }
+
+    let mut last_error = None;
+    if concurrent {
+        let mut attempts: FuturesUnordered<_> = addresses.into_iter().map(connect).collect();
+        while let Some(result) = attempts.next().await {
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error) => last_error = Some(error),
+            }
+        }
+    } else {
+        let mut candidates = addresses.into_iter().peekable();
+        while let Some(address) = candidates.next() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!("TCP dial timeout"));
+            }
+            let attempt = connect(address);
+            let result = if candidates.peek().is_some() {
+                // Leave time for the next candidate even if resolution consumed most of the budget.
+                timeout(TCP_ATTEMPT_BUDGET.min(remaining / 2), attempt)
+                    .await
+                    .context("TCP connection attempt timed out")
+                    .flatten()
+            } else {
+                attempt.await
+            };
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error) => last_error = Some(error),
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("no connection candidates")))
 }
 
 pub(super) async fn connect_udp_candidates(

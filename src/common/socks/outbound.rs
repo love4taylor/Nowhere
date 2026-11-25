@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::net::{TcpStream, lookup_host};
+use tokio::time::{Instant, timeout_at};
 
 use crate::common::dns::DnsResolver;
 use crate::common::network::{
     connect_tcp_addr, connect_tcp_candidates, connect_udp_addr, connect_udp_candidates,
-    filter_addrs_for_family, race_tcp_candidates,
+    dial_tcp_candidates, filter_addrs_for_family,
 };
-use crate::common::{AddressFamily, DialPolicy, dial_tcp_with_policy, dial_udp_with_policy};
+use crate::common::{AddressFamily, DialPolicy, dial_udp_with_policy};
 use crate::protocol::Target;
 
 use super::config::SocksConfig;
@@ -50,43 +51,33 @@ impl OutboundDialer {
         target: &Target,
         timeout: Duration,
     ) -> Result<TcpStream> {
-        let Some(config) = &self.socks else {
-            return match target {
-                Target::Ip(address) => tokio::time::timeout(
-                    timeout,
-                    connect_tcp_addr(self.dial_policy.local_ip(address.ip())?, *address),
-                )
-                .await
-                .context("common::socks::OutboundDialer::dial_tcp: dial timeout")?,
-                Target::Domain { host, port } if self.dns.is_some() => {
-                    tokio::time::timeout(timeout, async {
-                        let addresses = resolve_host(host, *port, self.dns.as_ref()).await?;
-                        connect_tcp_candidates(
-                            &self.dial_policy,
-                            filter_addrs_for_family(
-                                addresses.into_iter(),
-                                &self.dial_policy,
-                                AddressFamily::Any,
-                            ),
-                        )
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .context("TCP dial timeout exceeds timer implementation limit")?;
+        let connect = async {
+            if let Some(config) = &self.socks {
+                return self
+                    .dial_socks_tcp(config, &SocksAddress::from_target(target), deadline)
+                    .await;
+            }
+            match target {
+                Target::Ip(address) => {
+                    connect_tcp_addr(self.dial_policy.local_ip(address.ip())?, *address).await
+                }
+                Target::Domain { host, port } => {
+                    let addresses = resolve_host(host, *port, self.dns.as_ref())
                         .await
-                    })
-                    .await
-                    .context("DNS TCP dial timeout")?
-                }
-                Target::Domain { .. } => {
-                    dial_tcp_with_policy(
+                        .context("failed to resolve TCP target")?;
+                    let addresses = filter_addrs_for_family(
+                        addresses.into_iter(),
                         &self.dial_policy,
-                        &target.to_string(),
-                        timeout,
                         AddressFamily::Any,
-                    )
-                    .await
+                    );
+                    connect_tcp_candidates(&self.dial_policy, addresses, deadline).await
                 }
-            };
+            }
         };
-        let target = SocksAddress::from_target(target);
-        tokio::time::timeout(timeout, self.dial_socks_tcp(config, &target))
+        timeout_at(deadline, connect)
             .await
             .context("common::socks::OutboundDialer::dial_tcp: dial timeout")?
     }
@@ -139,6 +130,7 @@ impl OutboundDialer {
         &self,
         config: &SocksConfig,
         target: &SocksAddress,
+        deadline: Instant,
     ) -> Result<TcpStream> {
         let addrs = resolve_proxy(config, &self.dial_policy, self.dns.as_ref()).await?;
         let connect = |addr: SocketAddr| async move {
@@ -147,19 +139,7 @@ impl OutboundDialer {
             send_command(&mut stream, COMMAND_CONNECT, target).await?;
             Ok(stream)
         };
-        if self.dial_policy.tcp_concurrent() {
-            return race_tcp_candidates(&self.dial_policy, addrs, connect).await;
-        }
-        let mut last_err = None;
-        for attempt in addrs.into_iter().map(connect) {
-            match attempt.await {
-                Ok(stream) => return Ok(stream),
-                Err(err) => last_err = Some(err),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            anyhow!("common::socks::OutboundDialer::dial_tcp: no proxy address")
-        }))
+        dial_tcp_candidates(&self.dial_policy, addrs, deadline, connect).await
     }
 
     async fn dial_socks_udp(

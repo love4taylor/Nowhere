@@ -122,8 +122,8 @@ Portal listens on `ENDPOINT` and uses one fixed `out` for all Flows.
 | Parameter | Accepted value | Default | Purpose |
 |---|---|---|---|
 | `out` | `direct`, `egress` or `[USER:PASS@]HOST:PORT` | `direct` | Direct target access, registered Egress or a SOCKS5 upstream |
-| `prefer` | `ipv4`, `ipv6` or `default` | `default` | Address family tried first for DNS-resolved Portal outbound connections |
-| `tcp-concurrent` | `0` or `1` | `0` | Race all eligible DNS addresses for TCP Flows and use the first successful connection |
+| `prefer` | `ipv4` or `ipv6` | Omitted | Override the first address family for DNS-resolved Portal outbound connections |
+| `tcp-concurrent` | `0` or `1` | `0` | Race eligible outbound TCP addresses within each address family |
 | `tls` | `1` or `2` | `1` | Generated certificate (`1`) or supplied PEM files (`2`) for TLS and QUIC |
 | `crt` | Certificate-chain PEM path | Absent | Required exactly when `tls=2` |
 | `key` | Private-key PEM path | Absent | Required exactly when `tls=2` |
@@ -147,30 +147,26 @@ form, an omitted family uses `auto`. Explicit source binding errors fail the
 dial; they do not trigger an unbound retry. Portal applies these settings to
 its own outbound work, including connections to a SOCKS5 upstream.
 
-`prefer=ipv4` or `prefer=ipv6` tries DNS addresses of the selected family first,
-preserving resolver order within each family. Connection failures can fall back
-to the other family within the same dial timeout. `prefer=default` (or omission)
-preserves resolver order. Literal target IPs and source address restrictions
-still apply. With a SOCKS5 upstream, preference affects the proxy and UDP relay
-addresses resolved by Portal; target domains are sent to the proxy unchanged.
+TCP uses Happy Eyeballs for IPv4 and IPv6. With `prefer` omitted, the first
+eligible resolver result selects the first family. `prefer=ipv4` or
+`prefer=ipv6` overrides that choice. The other family starts after 250 ms
+without a successful connection, or immediately if every attempt in the first
+family fails. A short remaining dial budget can shorten the delay. When only
+one family is eligible, it starts immediately. The first success wins and
+closes any pending attempts.
 
-`tcp-concurrent=1` starts TCP connection attempts concurrently within the
-address group selected by `prefer` and uses the first success. Other attempts
-are closed when a winner is selected, the dial times out or the Flow is cancelled. DNS
-resolution and every attempt share the existing TCP dial timeout. Source address
-binding and family restrictions apply to each candidate. A literal target IP
-still produces a single attempt.
+With `tcp-concurrent=1`, all eligible TCP addresses in a family race as soon as
+that family starts. With `tcp-concurrent=0`, each family tries its addresses
+sequentially in resolver order. An attempt with another address queued in the
+same family gets up to 2 seconds, or half the remaining dial budget if shorter.
+The final attempt in each family gets the rest of the budget. For UDP, Portal
+tries addresses sequentially in resolver order, with an explicitly preferred
+family grouped first.
 
-`prefer` takes precedence over concurrency. With `prefer=ipv4`, all eligible
-IPv4 addresses race first; only after every IPv4 attempt fails do IPv6 addresses
-race. `prefer=ipv6` reverses the groups. If the preferred family has no eligible
-addresses, the other family starts immediately. A pending preferred attempt
-continues until it fails or the shared dial timeout expires; timeout ends the
-Flow without granting the fallback group another timeout.
-With `prefer=default` (or omission), all eligible addresses race together.
-Leave `tcp-concurrent=0` (the default) to try addresses sequentially in
-preference order. UDP Flows, including SOCKS5 UDP associations, retain their
-existing sequential setup.
+DNS resolution and all attempts share the TCP dial deadline. The dial deadline
+or Flow cancellation closes any pending attempts. Source binding and family
+restrictions apply to each attempt. A literal target IP for direct TCP uses a
+single attempt.
 
 For a SOCKS5 upstream, the race uses the proxy's resolved addresses and a
 candidate succeeds after SOCKS authentication and CONNECT finish. Target domains
@@ -456,7 +452,7 @@ A dash means that the role does not recognize the parameter.
 | `dial` | IP literal, `auto` | `auto` | Yes | — | Yes |
 | `dial4` | IPv4 literal, `auto` | `auto` | Yes | — | Yes |
 | `dial6` | IPv6 literal, `auto` | `auto` | Yes | — | Yes |
-| `prefer` | `ipv4`, `ipv6`, `default` | `default` | Yes | — | — |
+| `prefer` | `ipv4`, `ipv6` | Omitted | Yes | — | — |
 | `tcp-concurrent` | `0`, `1` | `0` | Yes | — | — |
 | `morph` | `0`, `1` | `1` | Yes | Yes | Yes |
 | `grade` | `full`, `core` | `full` | Yes | Yes | Yes |

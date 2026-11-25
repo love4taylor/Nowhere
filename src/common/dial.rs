@@ -50,10 +50,10 @@ impl DialPolicy {
             Some(_) => bail!("tcp-concurrent must be 0 or 1"),
         };
         let preference = match query.get("prefer").map(String::as_str) {
-            None | Some("default") => AddressPreference::Default,
+            None => AddressPreference::Default,
             Some("ipv4") => AddressPreference::Ipv4,
             Some("ipv6") => AddressPreference::Ipv6,
-            Some(_) => bail!("prefer must be ipv4, ipv6 or default"),
+            Some(_) => bail!("prefer must be ipv4 or ipv6"),
         };
         let dial = query.get("dial");
         let has_families = query.contains_key("dial4") || query.contains_key("dial6");

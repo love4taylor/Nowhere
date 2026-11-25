@@ -72,8 +72,8 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
             "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&prefer=ipv4&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
         ),
         (
-            "?prefer=default",
-            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
+            "?tcp-concurrent=1",
+            "portal://127.0.0.1:2000?out=direct&tls=1&dial=auto&tcp-concurrent=1&morph=1&grade=full&cipher=chacha&rate=0&etar=0",
         ),
         (
             "?prefer=ipv4&tcp-concurrent=1",
@@ -110,13 +110,21 @@ fn startup_url_preserves_effective_values_and_omits_credentials() {
 
 #[test]
 fn egress_output_rejects_portal_address_preference() {
-    for value in ["default", "ipv4", "ipv6"] {
+    for value in ["ipv4", "ipv6"] {
         let url = Url::parse(&format!(
             "portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?out=egress&prefer={value}"
         ))
         .unwrap();
         assert!(Portal::new(url, Logger).is_err());
     }
+}
+
+#[test]
+fn portal_requires_omitting_prefer_to_select_the_first_resolved_family() {
+    let url = Url::parse("portal://0123456789abcdef0123456789abcdef@127.0.0.1:2000?prefer=default")
+        .unwrap();
+    let error = Portal::new(url, Logger).err().unwrap();
+    assert_eq!(error.to_string(), "prefer must be ipv4 or ipv6");
 }
 
 #[test]
