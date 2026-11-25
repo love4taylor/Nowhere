@@ -3,10 +3,6 @@
 
 //! Library entry point for the Nowhere Portal, Vector and Egress runtimes.
 
-#[cfg(test)]
-#[global_allocator]
-static TEST_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 mod common;
 mod egress;
 mod portal;

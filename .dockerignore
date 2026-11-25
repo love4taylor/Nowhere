@@ -3,6 +3,3 @@
 !Cargo.lock
 !src/
 !src/**
-!vendor/
-!vendor/libmimalloc-sys/
-!vendor/libmimalloc-sys/**

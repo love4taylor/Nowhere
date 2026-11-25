@@ -1,28 +1,9 @@
 // Copyright (C) 2026 NodePassProject <https://github.com/NodePassProject>
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Allocator selection, CLI configuration validation and secret redaction.
+//! CLI configuration validation and secret redaction.
 
 use super::super::start;
-
-#[test]
-fn global_allocator_uses_mimalloc_3_6_1() {
-    unsafe extern "C" {
-        fn mi_version() -> std::ffi::c_int;
-        fn mi_any_heap_contains(pointer: *const std::ffi::c_void) -> bool;
-    }
-
-    let allocation = Box::new([0_u8; 4096]);
-    // SAFETY: These are read-only mimalloc queries; the allocation stays live.
-    let (version, owned) = unsafe {
-        (
-            mi_version(),
-            mi_any_heap_contains(allocation.as_ptr().cast()),
-        )
-    };
-    assert_eq!(version, 30601, "unexpected mimalloc C library version");
-    assert!(owned, "Rust global allocations must belong to mimalloc");
-}
 
 #[tokio::test]
 async fn fingerprint_rejects_invalid_raw_share_links_before_network_access() {
